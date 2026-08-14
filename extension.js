@@ -428,6 +428,7 @@ function buildErrorHtml(reason) {
     <div class="title">无法连接 DeepSeek Harness</div>
     <div class="sub">${escapeHtml(reason)}</div>
     <div class="hint">请确认 dsh 已安装，或点击面板顶部的“刷新”重试。</div>
+    <div class="hint">如未安装 dsh 请参考：https://www.runoob.com/deepseek-harness/deepseek-harness-install.html</div>
   </div>
 </body>
 </html>`;
