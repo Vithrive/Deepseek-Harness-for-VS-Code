@@ -14,6 +14,9 @@ let activeView = null;
 let managedChild = null;
 // 防止多个视图实例同时触发启动。
 let ensurePromise = null;
+// 解析出的 dsh 启动方式：{ cmd, prefix }。null 表示尚未解析或都不可用。
+// 优先全局安装（dsh 命令），其次 npx 缓存安装（npx 安装不会写入全局 PATH）。
+let dshInvocation = null;
 
 /**
  * 读取配置。
@@ -39,13 +42,16 @@ function getDshCommand() {
 }
 
 /**
- * 检测 dsh 是否已安装。在扩展运行的机器上执行 ——
- * 本地场景即本机，Remote/vscode-server 场景即远程服务器。
+ * 执行一条命令并判断是否成功（exit code === 0）。
+ * 在扩展运行的机器上执行 —— 本地场景即本机，Remote/vscode-server 场景即远程服务器。
+ * @param {string} cmd
+ * @param {string[]} args
+ * @param {number} timeoutMs
  * @returns {Promise<boolean>}
  */
-function checkDshInstalled() {
+function runCommandOk(cmd, args, timeoutMs = 15000) {
   return new Promise((resolve) => {
-    const child = spawn(getDshCommand(), ['--version'], {
+    const child = spawn(cmd, args, {
       shell: process.platform === 'win32',
       stdio: 'ignore',
       windowsHide: true
@@ -62,8 +68,28 @@ function checkDshInstalled() {
     setTimeout(() => {
       try { child.kill(); } catch (_) { /* noop */ }
       finish(false);
-    }, 15000);
+    }, timeoutMs);
   });
+}
+
+/**
+ * 解析可用的 dsh 启动方式，返回 { cmd, prefix } 或 null。
+ * 1) 优先配置的 dsh 命令（默认 'dsh'，即 npm 全局安装、已写入 PATH）；
+ * 2) 回退到 npx 缓存安装（npx 安装只缓存到 npx 目录，不写全局 PATH，
+ *    此时 'dsh' 不在 PATH 里，但 'npx @deepseek-ai/dsh' 仍可运行）。
+ * 探测 npx 用 --no-install：只检查本地/全局/npx 缓存，缺失时不触发下载，
+ * 从而保留「完全未安装时弹出安装提示」的既有流程。
+ * @returns {Promise<{cmd: string, prefix: string[]} | null>}
+ */
+async function resolveDshInvocation() {
+  const cmd = getDshCommand();
+  if (await runCommandOk(cmd, ['--version'])) {
+    return { cmd, prefix: [] };
+  }
+  if (await runCommandOk('npx', ['--no-install', '@deepseek-ai/dsh', '--version'])) {
+    return { cmd: 'npx', prefix: ['--yes', '@deepseek-ai/dsh'] };
+  }
+  return null;
 }
 
 /**
@@ -90,7 +116,9 @@ function installDsh() {
  * @returns {Promise<boolean>} 最终是否已安装可用。
  */
 async function ensureDshInstalled() {
-  if (await checkDshInstalled()) {
+  const inv = await resolveDshInvocation();
+  if (inv) {
+    dshInvocation = inv;
     return true;
   }
 
@@ -124,7 +152,12 @@ async function ensureDshInstalled() {
   if (!installed) {
     return false;
   }
-  return checkDshInstalled();
+  const after = await resolveDshInvocation();
+  if (after) {
+    dshInvocation = after;
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -258,12 +291,16 @@ async function registerWorkspace() {
  * @returns {import('child_process').ChildProcess}
  */
 function startDsh() {
+  // 使用 ensureDshInstalled 解析出的启动方式（全局 dsh 或 npx）。
+  // 兜底回退到配置的命令，避免异常时序下拿到空值。
+  const inv = dshInvocation || { cmd: getDshCommand(), prefix: [] };
   const args = [
+    ...inv.prefix,
     'web',
     '--host', String(getHost()),
     '--port', String(getPort())
   ];
-  const child = spawn(getDshCommand(), args, {
+  const child = spawn(inv.cmd, args, {
     cwd: getWorkspaceDir(),
     shell: process.platform === 'win32',
     windowsHide: true,
