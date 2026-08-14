@@ -4,16 +4,16 @@
 
 ## 快速安装（下载 .vsix）
 
-1. 从 [GitHub Releases](https://github.com/cszr-liuxiaobo/Deepseek-Harness-for-VS-Code/releases/latest) 下载最新的 `.vsix` 安装包：
+1. 从 [GitHub Releases](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest) 下载最新的 `.vsix` 安装包：
 
    ```
-   https://github.com/cszr-liuxiaobo/Deepseek-Harness-for-VS-Code/releases/latest/download/deepseek-harness-vscode-0.1.0.vsix
+   https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest/download/deepseek-harness-vscode-0.2.0.vsix
    ```
 
 2. 在 VS Code 中安装：
 
    ```bash
-   code --install-extension deepseek-harness-vscode-0.1.0.vsix
+   code --install-extension deepseek-harness-vscode-0.2.0.vsix
    ```
 
    或在 VS Code 中：`Ctrl+Shift+P` → `Extensions: Install from VSIX...` → 选择下载的 `.vsix` 文件。
@@ -43,7 +43,7 @@
 1. 克隆并打开本目录：
 
    ```bash
-   git clone https://github.com/cszr-liuxiaobo/Deepseek-Harness-for-VS-Code.git
+   git clone https://github.com/Vithrive/Deepseek-Harness-for-VS-Code.git
    code Deepseek-Harness-for-VS-Code
    ```
 
@@ -63,7 +63,7 @@
 ```bash
 cd DeepSeek-Harness-for-VS-Code
 npx --yes @vscode/vsce package --allow-missing-repository
-code --install-extension deepseek-harness-vscode-0.1.0.vsix
+code --install-extension deepseek-harness-vscode-0.2.0.vsix
 ```
 
 ## 配置
@@ -137,9 +137,9 @@ ssh -L 3080:127.0.0.1:3080 user@your-server
 
 ## 分支说明
 
-- `dev-*`：开发分支（当前为 `dev-1.1`）
+- `dev-*`：开发分支（当前为 `dev-1.2`）
 - `main`：与最新 `dev-*` 内容保持一致，作为默认分支
-- `.vsix` 安装包通过 [GitHub Releases](https://github.com/cszr-liuxiaobo/Deepseek-Harness-for-VS-Code/releases) 发布
+- `.vsix` 安装包通过 [GitHub Releases](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases) 发布
 
 ## 前置条件
 
