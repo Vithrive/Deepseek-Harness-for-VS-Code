@@ -2,7 +2,7 @@
   "name": "deepseek-harness-vscode",
   "displayName": "DeepSeek Harness for VS Code",
   "description": "在 VS Code 辅助侧边栏中打开 DeepSeek Harness (DSH) Web GUI，并自动检测与启动 DSH 服务",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -12,6 +12,9 @@
     "Other"
   ],
   "main": "./extension.js",
+  "extensionKind": [
+    "workspace"
+  ],
   "activationEvents": [
     "onView:dsh.webview"
   ],
@@ -43,6 +46,11 @@
           "type": "boolean",
           "default": true,
           "description": "是否把 VS Code 当前工作区自动注册为 DSH 工作区（新会话默认使用该工作区）"
+        },
+        "dshPanel.autoInstallDsh": {
+          "type": "boolean",
+          "default": true,
+          "description": "检测到当前环境（含远程服务器）未安装 dsh 时，是否提示并代为安装（npm install -g @deepseek-ai/dsh）"
         },
         "dshPanel.dshCommand": {
           "type": "string",

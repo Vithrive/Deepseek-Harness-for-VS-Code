@@ -2,7 +2,7 @@ const vscode = require('vscode');
 const http = require('http');
 const https = require('https');
 const os = require('os');
-const { spawn } = require('child_process');
+const { spawn, exec } = require('child_process');
 
 const VIEW_ID = 'dsh.webview';
 const DEFAULT_URL = 'http://127.0.0.1:3080';
@@ -35,6 +35,112 @@ function getPort() {
 
 function getDshCommand() {
   return cfg().get('dshPanel.dshCommand', 'dsh');
+}
+
+/**
+ * 检测 dsh 是否已安装。在扩展运行的机器上执行 ——
+ * 本地场景即本机，Remote/vscode-server 场景即远程服务器。
+ * @returns {Promise<boolean>}
+ */
+function checkDshInstalled() {
+  return new Promise((resolve) => {
+    const child = spawn(getDshCommand(), ['--version'], {
+      shell: process.platform === 'win32',
+      stdio: 'ignore',
+      windowsHide: true
+    });
+    let settled = false;
+    const finish = (value) => {
+      if (!settled) {
+        settled = true;
+        resolve(value);
+      }
+    };
+    child.on('error', () => finish(false));
+    child.on('exit', (code) => finish(code === 0));
+    setTimeout(() => {
+      try { child.kill(); } catch (_) { /* noop */ }
+      finish(false);
+    }, 15000);
+  });
+}
+
+/**
+ * 安装 dsh（npm 全局安装）。在远程场景即在服务器上执行。
+ * @returns {Promise<void>}
+ */
+function installDsh() {
+  return new Promise((resolve, reject) => {
+    exec('npm install -g @deepseek-ai/dsh', {
+      timeout: 300000,
+      windowsHide: true
+    }, (err, _stdout, stderr) => {
+      if (err) {
+        reject(new Error((stderr || '').trim() || err.message));
+      } else {
+        resolve();
+      }
+    });
+  });
+}
+
+/**
+ * 确保 dsh 已安装。未安装时，按配置提示用户并代为安装。
+ * @returns {Promise<boolean>} 最终是否已安装可用。
+ */
+async function ensureDshInstalled() {
+  if (await checkDshInstalled()) {
+    return true;
+  }
+
+  if (!cfg().get('dshPanel.autoInstallDsh', true)) {
+    return false;
+  }
+
+  const choice = await vscode.window.showWarningMessage(
+    '检测到当前环境未安装 DeepSeek Harness (dsh)，是否现在安装？',
+    { modal: true },
+    '安装',
+    '取消'
+  );
+  if (choice !== '安装') {
+    return false;
+  }
+
+  const installed = await vscode.window.withProgress({
+    location: vscode.ProgressLocation.Notification,
+    title: '正在安装 DeepSeek Harness（npm install -g @deepseek-ai/dsh）…',
+    cancellable: false
+  }, async () => {
+    try {
+      await installDsh();
+      return true;
+    } catch (e) {
+      vscode.window.showErrorMessage(`DeepSeek Harness 安装失败：${e.message}`);
+      return false;
+    }
+  });
+
+  if (!installed) {
+    return false;
+  }
+  return checkDshInstalled();
+}
+
+/**
+ * 将服务地址转换为 webview 可访问的显示地址。
+ * 本地场景返回原地址；Remote/vscode-server 场景通过 asExternalUri
+ * 自动建立端口转发，把远程 3080 暴露到本地供 iframe 加载。
+ * @returns {Promise<string>}
+ */
+async function resolveDisplayUrl() {
+  const url = getUrl();
+  try {
+    const external = await vscode.env.asExternalUri(vscode.Uri.parse(url));
+    return external.toString();
+  } catch {
+    return url;
+  }
 }
 
 /**
@@ -276,13 +382,14 @@ function buildErrorHtml(reason) {
 }
 
 function buildIframeHtml(url) {
-  // 只允许 iframe 加载目标地址，其余资源一律禁止，保持 webview 沙箱安全。
+  // 只允许 iframe 加载本机回环地址（任意端口），其余资源一律禁止，保持 webview 沙箱安全。
+  // 端口用通配符，是因为 Remote 场景下 asExternalUri 会分配一个本地转发端口，无法预先固定。
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; frame-src ${url} http://127.0.0.1:3080; style-src 'unsafe-inline';">
+      content="default-src 'none'; frame-src http://127.0.0.1:* http://localhost:*; style-src 'unsafe-inline';">
 </head>
 <body style="margin:0;padding:0;width:100vw;height:100vh;overflow:hidden;background:#1e1e1e;">
 <iframe src="${url}"
@@ -305,6 +412,17 @@ async function render(view) {
   view.description = getUrl();
   view.webview.html = buildLoadingHtml();
 
+  // 先确保 dsh 已安装（远程场景即在服务器上检查/安装）。
+  const installed = await ensureDshInstalled();
+  if (activeView !== view) return;
+  if (!installed) {
+    view.description = '未安装 dsh';
+    view.webview.html = buildErrorHtml(
+      '未检测到 DeepSeek Harness (dsh)，且已取消安装。请手动安装后点击“刷新”。'
+    );
+    return;
+  }
+
   const ok = await ensureRunningOnce();
   // await 期间视图可能已被关闭；只有仍是当前活动视图时才继续渲染。
   if (activeView !== view) return;
@@ -312,8 +430,11 @@ async function render(view) {
   if (ok) {
     // 服务就绪后，尽力把 VSCode 当前工作区注册进 DSH 工作区列表（不阻塞渲染）。
     registerWorkspace().catch(() => {});
+    // iframe 用显示地址（远程场景经端口转发），检测/API 仍用服务地址。
+    const displayUrl = await resolveDisplayUrl();
+    if (activeView !== view) return;
     view.description = getUrl();
-    view.webview.html = buildIframeHtml(getUrl());
+    view.webview.html = buildIframeHtml(displayUrl);
   } else {
     view.description = '未连接';
     view.webview.html = buildErrorHtml(

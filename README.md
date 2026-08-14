@@ -30,6 +30,7 @@
 - **自动启动**：检测到未运行时，自动执行 `dsh web --host <host> --port <port>` 启动 DSH
 - **工作区自动绑定**：启动 dsh 时使用 VS Code 当前打开的工作区文件夹作为 dsh 工作目录（无工作区则退回用户主目录）
 - **工作区自动注册**：把 VS Code 当前工作区自动注册为 DSH 工作区，新会话默认使用该工作区（除非用户在 DSH 里手动切换）
+- **远程（vscode-server）支持**：在 Remote-SSH / Dev Containers 等远程场景下运行，自动检测并安装服务器端的 dsh，并通过端口转发把 DSH 面板接入本地 VS Code
 - **就绪等待**：启动后自动轮询等待服务就绪，再渲染界面，避免白屏
 - 面板顶部提供「刷新」和「在浏览器中打开」按钮
 
@@ -76,6 +77,7 @@ code --install-extension deepseek-harness-vscode-0.1.0.vsix
   "dshPanel.port": 3080,
   "dshPanel.autoStart": true,
   "dshPanel.autoRegisterWorkspace": true,
+  "dshPanel.autoInstallDsh": true,
   "dshPanel.dshCommand": "dsh",
   "dshPanel.killOnDispose": true
 }
@@ -90,12 +92,25 @@ code --install-extension deepseek-harness-vscode-0.1.0.vsix
 | `dshPanel.port` | `3080` | 自动启动时监听的端口 |
 | `dshPanel.autoStart` | `true` | 未运行时是否自动启动 dsh |
 | `dshPanel.autoRegisterWorkspace` | `true` | 是否把 VS Code 当前工作区自动注册为 DSH 工作区 |
+| `dshPanel.autoInstallDsh` | `true` | 未安装 dsh 时是否提示并代为安装 |
 | `dshPanel.dshCommand` | `dsh` | dsh 命令（可填完整路径） |
 | `dshPanel.killOnDispose` | `true` | 扩展停用时是否结束它启动的 dsh |
 
-### 连接远程服务器上的 DSH
+### 远程服务器（vscode-server）场景
 
-先建立 SSH 隧道：
+本扩展声明 `extensionKind: ["workspace"]`，在 Remote-SSH / Dev Containers 等远程场景下运行于服务器端，因此：
+
+1. **自动检测并安装 dsh**：打开面板时，会在服务器端执行 `dsh --version` 检测是否已安装 DeepSeek Harness。未安装时弹出提示，确认后自动执行 `npm install -g @deepseek-ai/dsh`（要求服务器已安装 Node.js 与 npm）。
+
+2. **自动端口转发**：DSH 在服务器上监听 `127.0.0.1:3080`。扩展通过 `vscode.env.asExternalUri` 自动建立端口转发，把远程端口暴露到本地，使侧边栏中的 iframe 能直接加载远程 DSH 界面，无需手动配置 SSH 隧道。
+
+3. **工作区自动对接**：dsh 以远程工作区为 `cwd` 启动，新会话默认使用该远程工作区，并自动注册到 DSH 工作区列表。
+
+> 注意：VS Code 首次转发端口可能弹出「是否转发端口」的确认，选择允许即可。
+
+### 手动 SSH 隧道（可选，非远程场景）
+
+如果你的 DSH 跑在另一台机器、且不是通过 VS Code Remote 连接的，可手动建立 SSH 隧道：
 
 ```bash
 ssh -L 3080:127.0.0.1:3080 user@your-server
