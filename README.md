@@ -137,7 +137,7 @@ ssh -L 3080:127.0.0.1:3080 user@your-server
 
 ## 分支说明
 
-- `dev-*`：开发分支（当前为 `dev-1.2`）
+- `dev-<版本号>`：开发分支，命名与扩展版本号一致（历史 `dev-0.1.0`，当前 `dev-0.2.0`）
 - `main`：与最新 `dev-*` 内容保持一致，作为默认分支
 - `.vsix` 安装包通过 [GitHub Releases](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases) 发布
 
