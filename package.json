@@ -1,8 +1,8 @@
 {
   "name": "deepseek-harness-vscode",
-  "displayName": "DeepSeek Harness Panel (Vithrive)",
+  "displayName": "DeepSeek Harness for VSCode",
   "description": "在 VS Code 辅助侧边栏中打开 DeepSeek Harness (DSH) Web GUI，并自动检测与启动 DSH 服务",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "vithrive",
   "license": "MIT",
   "repository": {
