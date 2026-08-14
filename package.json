@@ -1,0 +1,99 @@
+{
+  "name": "deepseek-harness-vscode",
+  "displayName": "DeepSeek Harness for VS Code",
+  "description": "在 VS Code 辅助侧边栏中打开 DeepSeek Harness (DSH) Web GUI，并自动检测与启动 DSH 服务",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onView:dsh.webview"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "DeepSeek Harness Panel",
+      "properties": {
+        "dshPanel.url": {
+          "type": "string",
+          "default": "http://127.0.0.1:3080",
+          "description": "DeepSeek Harness Web GUI 地址（本地或通过 SSH 隧道转发的地址）"
+        },
+        "dshPanel.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "自动启动 dsh 时绑定的主机地址"
+        },
+        "dshPanel.port": {
+          "type": "number",
+          "default": 3080,
+          "description": "自动启动 dsh 时监听的端口"
+        },
+        "dshPanel.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "检测到 DSH 未运行时，是否自动执行 dsh web 启动它"
+        },
+        "dshPanel.dshCommand": {
+          "type": "string",
+          "default": "dsh",
+          "description": "dsh 命令（默认从 PATH 解析；如需指定完整路径，例如 C:\\Users\\you\\AppData\\Roaming\\npm\\dsh.cmd）"
+        },
+        "dshPanel.killOnDispose": {
+          "type": "boolean",
+          "default": true,
+          "description": "扩展停用或 VS Code 关闭时，是否结束由本扩展启动的 dsh 进程（不影响你手动启动的 dsh）"
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dsh-panel",
+          "title": "DeepSeek Harness",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "dsh-panel": [
+        {
+          "type": "webview",
+          "id": "dsh.webview",
+          "name": "DeepSeek Harness"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "dshPanel.openInBrowser",
+        "title": "DeepSeek Harness: 在浏览器中打开",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "dshPanel.refresh",
+        "title": "DeepSeek Harness: 刷新",
+        "icon": "$(refresh)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "dshPanel.refresh",
+          "when": "view == dsh.webview",
+          "group": "navigation"
+        },
+        {
+          "command": "dshPanel.openInBrowser",
+          "when": "view == dsh.webview",
+          "group": "navigation"
+        }
+      ]
+    }
+  }
+}
