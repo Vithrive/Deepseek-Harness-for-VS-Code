@@ -2,6 +2,7 @@ const vscode = require('vscode');
 const http = require('http');
 const https = require('https');
 const os = require('os');
+const crypto = require('crypto');
 const { spawn, exec } = require('child_process');
 
 const VIEW_ID = 'dsh.webview';
@@ -130,7 +131,8 @@ async function ensureDshInstalled() {
 /**
  * 将服务地址转换为 webview 可访问的显示地址。
  * 本地场景返回原地址；Remote/vscode-server 场景通过 asExternalUri
- * 自动建立端口转发，把远程 3080 暴露到本地供 iframe 加载。
+ * 自动建立端口转发（可能是带本地转发端口的地址，也可能是 HTTPS 转发域名），
+ * 把远程 3080 暴露到本地供 iframe 加载。
  * @returns {Promise<string>}
  */
 async function resolveDisplayUrl() {
@@ -346,18 +348,53 @@ function ensureRunningOnce() {
   return ensurePromise;
 }
 
+/**
+ * 计算 iframe 的字体缩放比例。
+ * DSH 对话正文基准字号为 16px，按 editor.fontSize / 16 缩放，
+ * 使面板字号跟随编辑器；编辑器字号安全夹取到 8..72，缩放夹取到 0.5..2。
+ * @returns {number}
+ */
+function getFontScale() {
+  const raw = vscode.workspace.getConfiguration('editor').get('fontSize', 16);
+  const fontSize = Number(raw);
+  const base = Number.isFinite(fontSize) && fontSize > 0 ? fontSize : 16;
+  const clamped = Math.min(72, Math.max(8, base));
+  const scale = clamped / 16;
+  return Math.min(2, Math.max(0.5, scale));
+}
+
+/**
+ * 生成一次性 CSP nonce，用于放行内联缩放监听脚本。
+ * @returns {string}
+ */
+function makeNonce() {
+  return crypto.randomBytes(16).toString('base64');
+}
+
 function buildLoadingHtml() {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--vscode-editor-font-family, -apple-system, 'Segoe UI', sans-serif);
+    font-size: var(--vscode-editor-font-size, 13px);
+    color: var(--vscode-foreground);
+    background: var(--vscode-editor-background);
+  }
+  .sub { margin-top: 8px; color: var(--vscode-descriptionForeground); }
+</style>
 </head>
-<body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;
-            font-family:-apple-system,Segoe UI,sans-serif;color:#cccccc;background:#1e1e1e;">
+<body>
   <div style="text-align:center;">
     <div>正在启动 DeepSeek Harness…</div>
-    <div style="margin-top:8px;font-size:12px;color:#888;">工作区：${escapeHtml(getWorkspaceDir())}</div>
+    <div class="sub">工作区：${escapeHtml(getWorkspaceDir())}</div>
   </div>
 </body>
 </html>`;
@@ -369,32 +406,85 @@ function buildErrorHtml(reason) {
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--vscode-editor-font-family, -apple-system, 'Segoe UI', sans-serif);
+    font-size: var(--vscode-editor-font-size, 13px);
+    color: var(--vscode-errorForeground);
+    background: var(--vscode-editor-background);
+  }
+  .box { text-align: center; max-width: 80%; }
+  .title { font-weight: 600; }
+  .sub { margin-top: 8px; color: var(--vscode-descriptionForeground); word-break: break-all; }
+  .hint { margin-top: 12px; color: var(--vscode-descriptionForeground); }
+</style>
 </head>
-<body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;
-            font-family:-apple-system,Segoe UI,sans-serif;color:#e06c75;background:#1e1e1e;">
-  <div style="text-align:center;max-width:80%;">
-    <div style="font-size:14px;">无法连接 DeepSeek Harness</div>
-    <div style="margin-top:8px;font-size:12px;color:#888;word-break:break-all;">${escapeHtml(reason)}</div>
-    <div style="margin-top:12px;font-size:12px;color:#888;">请确认 dsh 已安装，或点击面板顶部的“刷新”重试。</div>
+<body>
+  <div class="box">
+    <div class="title">无法连接 DeepSeek Harness</div>
+    <div class="sub">${escapeHtml(reason)}</div>
+    <div class="hint">请确认 dsh 已安装，或点击面板顶部的“刷新”重试。</div>
   </div>
 </body>
 </html>`;
 }
 
-function buildIframeHtml(url) {
-  // 只允许 iframe 加载本机回环地址（任意端口），其余资源一律禁止，保持 webview 沙箱安全。
-  // 端口用通配符，是因为 Remote 场景下 asExternalUri 会分配一个本地转发端口，无法预先固定。
+function buildIframeHtml(url, scale) {
+  // 解析显示地址，仅放行 http/https，并把其精确 origin 写入 frame-src，
+  // 不再通配整个本机回环地址段，保持 webview 沙箱最小权限。
+  // Remote 场景下 asExternalUri 可能返回带转发端口的 localhost 地址，也可能返回 HTTPS 转发域名，
+  // 这里都按其实际 origin 精确放行，因此两种形式都兼容。
+  let target;
+  try {
+    target = new URL(url);
+  } catch (e) {
+    throw new Error(`无法解析显示地址：${url}`);
+  }
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+    throw new Error(`不允许的显示地址协议：${target.protocol}`);
+  }
+  const origin = target.origin; // 形如 http://127.0.0.1:3080 或 https://xxxx.example.com
+  const nonce = makeNonce();
+  const s = Number.isFinite(scale) ? Math.min(2, Math.max(0.5, scale)) : 1;
+  const pct = (100 / s).toFixed(4);
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; frame-src http://127.0.0.1:* http://localhost:*; style-src 'unsafe-inline';">
+      content="default-src 'none'; frame-src ${escapeHtml(origin)}; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 </head>
-<body style="margin:0;padding:0;width:100vw;height:100vh;overflow:hidden;background:#1e1e1e;">
-<iframe src="${url}"
-        style="width:100%;height:100%;border:none;display:block;"
+<body style="margin:0;padding:0;width:100vw;height:100vh;overflow:hidden;background:var(--vscode-editor-background);">
+<iframe id="dsh-frame" src="${escapeHtml(url)}"
+        style="width:${pct}%;height:${pct}%;border:none;display:block;transform:scale(${s});transform-origin:0 0;"
         allow="clipboard-read; clipboard-write; autoplay"></iframe>
+<script nonce="${nonce}">
+(function () {
+  var frame = document.getElementById('dsh-frame');
+  var current = ${s};
+  function apply(scale) {
+    var n = Number(scale);
+    if (!isFinite(n)) return;
+    n = Math.min(2, Math.max(0.5, n));
+    if (n === current) return;
+    current = n;
+    var pct = (100 / n).toFixed(4) + '%';
+    frame.style.transform = 'scale(' + n + ')';
+    frame.style.width = pct;
+    frame.style.height = pct;
+  }
+  window.addEventListener('message', function (event) {
+    var data = event.data;
+    if (data && data.type === 'dsh-font-scale' && typeof data.scale === 'number') {
+      apply(data.scale);
+    }
+  });
+}());
+</script>
 </body>
 </html>`;
 }
@@ -434,7 +524,13 @@ async function render(view) {
     const displayUrl = await resolveDisplayUrl();
     if (activeView !== view) return;
     view.description = getUrl();
-    view.webview.html = buildIframeHtml(displayUrl);
+    try {
+      view.webview.html = buildIframeHtml(displayUrl, getFontScale());
+    } catch (e) {
+      // 显示地址无法解析或协议不是 http/https 时，拒绝加载 iframe 并展示错误页。
+      view.description = '无法加载';
+      view.webview.html = buildErrorHtml(e.message);
+    }
   } else {
     view.description = '未连接';
     view.webview.html = buildErrorHtml(
@@ -458,6 +554,9 @@ function activate(context) {
       const cfgSub = vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration('dshPanel')) {
           render(view);
+        } else if (e.affectsConfiguration('editor.fontSize')) {
+          // 仅字号变化时不重载 iframe（避免打断当前对话），只推送新的缩放值。
+          view.webview.postMessage({ type: 'dsh-font-scale', scale: getFontScale() });
         }
       });
 
