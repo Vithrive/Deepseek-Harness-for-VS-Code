@@ -4,10 +4,10 @@
 
 ## 快速安装（下载 .vsix）
 
-1. 下载最新安装包：
+1. 从 [GitHub Releases](https://github.com/cszr-liuxiaobo/Deepseek-Harness-for-VS-Code/releases/latest) 下载最新的 `.vsix` 安装包：
 
    ```
-   https://github.com/cszr-liuxiaobo/Deepseek-Harness-for-VS-Code/raw/master/deepseek-harness-vscode-0.1.0.vsix
+   https://github.com/cszr-liuxiaobo/Deepseek-Harness-for-VS-Code/releases/latest/download/deepseek-harness-vscode-0.1.0.vsix
    ```
 
 2. 在 VS Code 中安装：
@@ -113,7 +113,8 @@ ssh -L 3080:127.0.0.1:3080 user@your-server
 ## 分支说明
 
 - `dev-*`：开发分支（当前为 `dev-1.1`）
-- `master`：与最新 `dev-*` 内容保持一致，供用户下载使用
+- `main`：与最新 `dev-*` 内容保持一致，作为默认分支
+- `.vsix` 安装包通过 [GitHub Releases](https://github.com/cszr-liuxiaobo/Deepseek-Harness-for-VS-Code/releases) 发布
 
 ## 前置条件
 
