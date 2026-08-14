@@ -76,6 +76,77 @@ function sleep(ms) {
 }
 
 /**
+ * 向 DSH 的 /api 端点发送 JSON RPC 请求。
+ * @param {string} url
+ * @param {object} payload
+ * @param {number} timeoutMs
+ * @returns {Promise<any>}
+ */
+function httpPostJson(url, payload, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    let target;
+    try {
+      target = new URL(url);
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    const lib = target.protocol === 'https:' ? https : http;
+    const data = JSON.stringify(payload);
+    const req = lib.request({
+      hostname: target.hostname,
+      port: target.port || (target.protocol === 'https:' ? 443 : 80),
+      path: target.pathname + target.search,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data)
+      }
+    }, (res) => {
+      let body = '';
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(body));
+        } catch {
+          resolve({ raw: body });
+        }
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout')));
+    req.write(data);
+    req.end();
+  });
+}
+
+/**
+ * 把 VS Code 当前工作区注册到 DSH 的工作区列表。
+ * workspace.create 是幂等的：已存在时返回现有记录，不会重复。
+ * 尽力而为，失败不影响面板渲染。
+ * @returns {Promise<boolean>}
+ */
+async function registerWorkspace() {
+  if (!cfg().get('dshPanel.autoRegisterWorkspace', true)) {
+    return false;
+  }
+  const base = getUrl().replace(/\/+$/, '');
+  const path = getWorkspaceDir();
+  const payload = {
+    type: 'client-request',
+    rpcId: 'vscode-' + Date.now().toString(36),
+    method: 'workspace.create',
+    payload: { path }
+  };
+  try {
+    const resp = await httpPostJson(base + '/api/workspace.create', payload);
+    return !!(resp && resp.result && resp.result.ok);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 启动 dsh web 进程。Windows 通过 shell 执行以命中 dsh.cmd shim。
  * @returns {import('child_process').ChildProcess}
  */
@@ -239,6 +310,8 @@ async function render(view) {
   if (activeView !== view) return;
 
   if (ok) {
+    // 服务就绪后，尽力把 VSCode 当前工作区注册进 DSH 工作区列表（不阻塞渲染）。
+    registerWorkspace().catch(() => {});
     view.description = getUrl();
     view.webview.html = buildIframeHtml(getUrl());
   } else {
@@ -292,7 +365,12 @@ function activate(context) {
     vscode.env.openExternal(vscode.Uri.parse(getUrl()));
   });
 
-  context.subscriptions.push(viewSub, refreshCmd, openBrowserCmd);
+  // VS Code 切换工作区（文件夹）时，把新工作区也注册进 DSH 列表。
+  const wsSub = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+    registerWorkspace().catch(() => {});
+  });
+
+  context.subscriptions.push(viewSub, refreshCmd, openBrowserCmd, wsSub);
 }
 
 function deactivate() {

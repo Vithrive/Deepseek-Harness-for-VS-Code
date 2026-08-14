@@ -29,6 +29,7 @@
 - **自动检测**：打开面板时探测 `dshPanel.url` 是否可访问
 - **自动启动**：检测到未运行时，自动执行 `dsh web --host <host> --port <port>` 启动 DSH
 - **工作区自动绑定**：启动 dsh 时使用 VS Code 当前打开的工作区文件夹作为 dsh 工作目录（无工作区则退回用户主目录）
+- **工作区自动注册**：把 VS Code 当前工作区自动注册为 DSH 工作区，新会话默认使用该工作区（除非用户在 DSH 里手动切换）
 - **就绪等待**：启动后自动轮询等待服务就绪，再渲染界面，避免白屏
 - 面板顶部提供「刷新」和「在浏览器中打开」按钮
 
@@ -74,6 +75,7 @@ code --install-extension deepseek-harness-vscode-0.1.0.vsix
   "dshPanel.host": "127.0.0.1",
   "dshPanel.port": 3080,
   "dshPanel.autoStart": true,
+  "dshPanel.autoRegisterWorkspace": true,
   "dshPanel.dshCommand": "dsh",
   "dshPanel.killOnDispose": true
 }
@@ -87,6 +89,7 @@ code --install-extension deepseek-harness-vscode-0.1.0.vsix
 | `dshPanel.host` | `127.0.0.1` | 自动启动时绑定的主机 |
 | `dshPanel.port` | `3080` | 自动启动时监听的端口 |
 | `dshPanel.autoStart` | `true` | 未运行时是否自动启动 dsh |
+| `dshPanel.autoRegisterWorkspace` | `true` | 是否把 VS Code 当前工作区自动注册为 DSH 工作区 |
 | `dshPanel.dshCommand` | `dsh` | dsh 命令（可填完整路径） |
 | `dshPanel.killOnDispose` | `true` | 扩展停用时是否结束它启动的 dsh |
 
@@ -106,9 +109,16 @@ ssh -L 3080:127.0.0.1:3080 user@your-server
 2. 用 Node 内置 `http`/`https` 探测 `dshPanel.url`；
 3. 未连接且 `autoStart` 开启 → `spawn('dsh web --host ... --port ...')`，`cwd` 设为 VS Code 工作区；
 4. 轮询等待服务就绪（最多约 30 秒）；
-5. 就绪后通过 `WebviewViewProvider` 渲染 iframe；
-6. `retainContextWhenHidden: true` 保持面板隐藏时不丢会话状态；
-7. 扩展停用时按 `killOnDispose` 决定是否结束它自己启动的 dsh（不影响你手动启动的实例）。
+5. 服务就绪后，通过 `POST /api/workspace.create` 把 VS Code 当前工作区注册为 DSH 工作区；
+6. 就绪后通过 `WebviewViewProvider` 渲染 iframe；
+7. `retainContextWhenHidden: true` 保持面板隐藏时不丢会话状态；
+8. 扩展停用时按 `killOnDispose` 决定是否结束它自己启动的 dsh（不影响你手动启动的实例）。
+
+## 工作区行为说明
+
+- **新会话默认工作区**：DSH 的新会话默认使用 `dsh` 进程的启动目录（`cwd`）作为工作区。扩展以 VS Code 当前工作区作为 `cwd` 启动 dsh，因此新会话默认指向 VS Code 工作区。
+- **工作区列表注册**：扩展会在服务就绪后调用 `workspace.create`，把 VS Code 工作区加入 DSH 的工作区列表（幂等，已存在则不重复）。
+- **用户可手动更改**：在 DSH 里手动选择其他工作区后，新会话会按你选择的工作区创建，扩展不会覆盖你的选择。
 
 ## 分支说明
 
