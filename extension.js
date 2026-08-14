@@ -101,8 +101,7 @@ async function ensureDshInstalled() {
   const choice = await vscode.window.showWarningMessage(
     '检测到当前环境未安装 DeepSeek Harness (dsh)，是否现在安装？',
     { modal: true },
-    '安装',
-    '取消'
+    '安装'
   );
   if (choice !== '安装') {
     return false;
