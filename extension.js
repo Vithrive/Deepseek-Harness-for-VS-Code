@@ -647,7 +647,7 @@ function activate(context) {
     if (await checkUrl(getUrl())) {
       view.description = getUrl();
       registerWorkspace().catch(() => {});
-      vscode.window.setStatusBarMessage('DeepSeek Harness: 已连接', 2000);
+      vscode.window.showInformationMessage('DeepSeek Harness: 服务已连接，无需重载（运行中的任务不受影响）。');
       return;
     }
     // 服务离线：走完整渲染（自动启动 + 重载 iframe）。
