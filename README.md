@@ -7,13 +7,13 @@
 1. 从 [GitHub Releases](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest) 下载最新的 `.vsix` 安装包：
 
    ```
-   https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest/download/deepseek-harness-vscode-0.2.6.vsix
+   https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest/download/deepseek-harness-vscode-0.2.7.vsix
    ```
 
 2. 在 VS Code 中安装：
 
    ```bash
-   code --install-extension deepseek-harness-vscode-0.2.6.vsix
+   code --install-extension deepseek-harness-vscode-0.2.7.vsix
    ```
 
    或在 VS Code 中：`Ctrl+Shift+P` → `Extensions: Install from VSIX...` → 选择下载的 `.vsix` 文件。
@@ -33,7 +33,7 @@
 - **远程（vscode-server）支持**：在 Remote-SSH / Dev Containers 等远程场景下运行，自动检测并安装服务器端的 dsh，并通过端口转发把 DSH 面板接入本地 VS Code
 - **就绪等待**：启动后自动轮询等待服务就绪，再渲染界面，避免白屏
 - **字号跟随编辑器**：面板整体等比缩放，从而让 16px 对话正文对齐 VS Code `editor.fontSize`（缩放比例 = `editor.fontSize` / 16，安全夹取到 8..72px / 0.5..2 倍），修改后即时生效，无需重载当前对话
-- 面板顶部提供「刷新」和「在浏览器中打开」按钮
+- 面板顶部提供「刷新」「重启 dsh web」和「在浏览器中打开」按钮；重启会结束当前 dsh 进程、释放端口并重新执行 `dsh web --host <host> --port <port>`
 
 ## 从源码安装（开发模式，零依赖，无需编译）
 
@@ -64,7 +64,7 @@
 ```bash
 cd DeepSeek-Harness-for-VS-Code
 npx --yes @vscode/vsce package --allow-missing-repository
-code --install-extension deepseek-harness-vscode-0.2.6.vsix
+code --install-extension deepseek-harness-vscode-0.2.7.vsix
 ```
 
 ## 配置
@@ -138,7 +138,7 @@ ssh -L 3080:127.0.0.1:3080 user@your-server
 
 ## 分支说明
 
-- `dev-<版本号>`：开发分支，命名与扩展版本号一致（历史 `dev-0.1.0`，当前 `dev-0.2.6`）
+- `dev-<版本号>`：开发分支，命名与扩展版本号一致（历史 `dev-0.1.0`，当前 `dev-0.2.7`）
 - `main`：与最新 `dev-*` 内容保持一致，作为默认分支
 - `.vsix` 安装包通过 [GitHub Releases](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases) 发布
 

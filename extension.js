@@ -385,6 +385,75 @@ function ensureRunningOnce() {
 }
 
 /**
+ * 释放指定端口上监听的进程（best-effort）。
+ * 用于「重启」：扩展自己启动的 dsh 已由 killTree 结束，这里再兜底清掉
+ * 可能由外部启动、或残留的 dsh 进程，确保新进程能成功绑定端口。
+ * @param {number} port
+ * @returns {Promise<void>}
+ */
+function freePort(port) {
+  return new Promise((resolve) => {
+    if (process.platform === 'win32') {
+      exec('netstat -ano -p tcp', { windowsHide: true, timeout: 10000 }, (err, stdout) => {
+        if (err) { resolve(); return; }
+        const pids = new Set();
+        for (const line of (stdout || '').split(/\r?\n/)) {
+          const parts = line.trim().split(/\s+/);
+          if (parts.length >= 5 &&
+              parts[0].toUpperCase() === 'TCP' &&
+              parts[1] && parts[1].endsWith(`:${port}`) &&
+              parts[3] && parts[3].toUpperCase() === 'LISTENING' &&
+              parts[4]) {
+            pids.add(parts[4]);
+          }
+        }
+        if (pids.size === 0) { resolve(); return; }
+        let remaining = pids.size;
+        const done = () => { if (--remaining === 0) resolve(); };
+        for (const pid of pids) {
+          const k = spawn('taskkill', ['/pid', pid, '/t', '/f'], { stdio: 'ignore', windowsHide: true });
+          k.on('exit', done);
+          k.on('error', done);
+        }
+      });
+    } else {
+      // POSIX：fuser 优先，失败退回 lsof + kill。命令本身 best-effort，忽略退出码。
+      exec(`fuser -k ${port}/tcp 2>/dev/null`, { timeout: 10000 }, () => {
+        exec(`lsof -ti:${port} 2>/dev/null | xargs -r kill -9 2>/dev/null`, { timeout: 10000 }, () => resolve());
+      });
+    }
+  });
+}
+
+/**
+ * 重启 dsh web：停掉当前 dsh、释放端口、重新启动并等待就绪。
+ * @returns {Promise<boolean>} 是否重启成功就绪。
+ */
+async function restartDsh() {
+  // 1. 结束扩展自己启动的 dsh 进程树。
+  if (managedChild) {
+    killTree(managedChild);
+    managedChild = null;
+  }
+  // 2. 兜底释放端口（外部启动 / 残留进程）。
+  await freePort(getPort());
+  // 3. 等端口真正释放（最多约 5 秒）。
+  const url = getUrl();
+  for (let i = 0; i < 10; i++) {
+    await sleep(500);
+    if (!(await checkUrl(url))) break;
+  }
+  // 4. 重新启动。
+  startDsh();
+  // 5. 等待就绪（最多约 30 秒）。
+  for (let i = 0; i < 60; i++) {
+    await sleep(500);
+    if (await checkUrl(url)) return true;
+  }
+  return false;
+}
+
+/**
  * 计算 iframe 的字体缩放比例。
  * DSH 对话正文基准字号为 16px，按 editor.fontSize / 16 缩放，
  * 使面板字号跟随编辑器；编辑器字号安全夹取到 8..72，缩放夹取到 0.5..2。
@@ -622,12 +691,48 @@ function activate(context) {
     vscode.env.openExternal(vscode.Uri.parse(getUrl()));
   });
 
+  const restartCmd = vscode.commands.registerCommand('dshPanel.restart', async () => {
+    if (!activeView) {
+      vscode.window.showInformationMessage('DeepSeek Harness 面板尚未打开，请先点击侧边栏图标。');
+      return;
+    }
+    const view = activeView;
+    view.description = '正在重启';
+    view.webview.html = buildLoadingHtml();
+
+    const installed = await ensureDshInstalled();
+    if (activeView !== view) return;
+    if (!installed) {
+      view.description = '未安装 dsh';
+      view.webview.html = buildErrorHtml('未检测到 DeepSeek Harness (dsh)，无法重启。请先安装后重试。');
+      return;
+    }
+
+    const ok = await restartDsh();
+    if (activeView !== view) return;
+    if (ok) {
+      registerWorkspace().catch(() => {});
+      const displayUrl = await resolveDisplayUrl();
+      if (activeView !== view) return;
+      view.description = getUrl();
+      try {
+        view.webview.html = buildIframeHtml(displayUrl, getFontScale());
+      } catch (e) {
+        view.description = '无法加载';
+        view.webview.html = buildErrorHtml(e.message);
+      }
+    } else {
+      view.description = '重启失败';
+      view.webview.html = buildErrorHtml('重启 dsh web 后仍无法连接，请确认端口未被占用或 dsh 可正常启动。');
+    }
+  });
+
   // VS Code 切换工作区（文件夹）时，把新工作区也注册进 DSH 列表。
   const wsSub = vscode.workspace.onDidChangeWorkspaceFolders(() => {
     registerWorkspace().catch(() => {});
   });
 
-  context.subscriptions.push(viewSub, refreshCmd, openBrowserCmd, wsSub);
+  context.subscriptions.push(viewSub, refreshCmd, openBrowserCmd, restartCmd, wsSub);
 }
 
 function deactivate() {
