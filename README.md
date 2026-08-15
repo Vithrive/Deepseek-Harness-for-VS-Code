@@ -2,18 +2,22 @@
 
 一个零依赖的 VS Code 扩展，把 DeepSeek Harness (DSH) 的 Web GUI 内嵌到 VS Code 侧边栏 / 辅助侧边栏中，并自动检测、启动 DSH 服务。
 
+本扩展的设计哲学是「只做一个忠实的窗口」：最大程度上客观、原样地呈现 DSH Web GUI，不注入脚本、不改写界面、不拦截交互，也完全不干涉你对 DSH 的插件开发、界面魔改等任何二次定制——DSH 的功能表达始终由你完全掌控。
+
+如果喜欢本扩展请转至 [Deepseek-Harness-for-VS-Code](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code) 星标助力；对 Chrome Extension 有需求也请关注 [Deepseek-Harness-for-Chrome](https://github.com/Vithrive/Deepseek-Harness-for-Chrome)。
+
 ## 快速安装（下载 .vsix）
 
 1. 从 [GitHub Releases](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest) 下载最新的 `.vsix` 安装包：
 
    ```
-   https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest/download/deepseek-harness-vscode-0.2.7.vsix
+   https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest/download/deepseek-harness-vscode-0.2.8.vsix
    ```
 
 2. 在 VS Code 中安装：
 
    ```bash
-   code --install-extension deepseek-harness-vscode-0.2.7.vsix
+   code --install-extension deepseek-harness-vscode-0.2.8.vsix
    ```
 
    或在 VS Code 中：`Ctrl+Shift+P` → `Extensions: Install from VSIX...` → 选择下载的 `.vsix` 文件。
@@ -64,7 +68,7 @@
 ```bash
 cd DeepSeek-Harness-for-VS-Code
 npx --yes @vscode/vsce package --allow-missing-repository
-code --install-extension deepseek-harness-vscode-0.2.7.vsix
+code --install-extension deepseek-harness-vscode-0.2.8.vsix
 ```
 
 ## 配置
@@ -138,7 +142,7 @@ ssh -L 3080:127.0.0.1:3080 user@your-server
 
 ## 分支说明
 
-- `dev-<版本号>`：开发分支，命名与扩展版本号一致（历史 `dev-0.1.0`，当前 `dev-0.2.7`）
+- `dev-<版本号>`：开发分支，命名与扩展版本号一致（历史 `dev-0.1.0`，当前 `dev-0.2.8`）
 - `main`：与最新 `dev-*` 内容保持一致，作为默认分支
 - `.vsix` 安装包通过 [GitHub Releases](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases) 发布
 
