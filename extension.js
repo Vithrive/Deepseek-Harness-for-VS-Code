@@ -385,25 +385,69 @@ function ensureRunningOnce() {
 }
 
 /**
- * 重启「本窗口启动」的 dsh web：停掉当前进程树、等端口释放、重新启动并等待就绪。
- * 只作用于本扩展启动的进程（managedChild）；dsh 是其他进程启动时（本窗口仅复用连接），
- * 由调用方先行拦截，绝不按端口或进程去 kill 别的进程正在使用的 dsh。
+ * 释放指定端口上监听的进程（best-effort）。
+ * 用于「重启」：本窗口持有的 dsh 由 killTree 结束，这里再兜底清掉本窗口未持有的
+ * dsh（外部启动 / 残留进程），确保新进程能成功绑定端口。仅在用户确认重启后调用。
+ * @param {number} port
+ * @returns {Promise<void>}
+ */
+function freePort(port) {
+  return new Promise((resolve) => {
+    if (process.platform === 'win32') {
+      exec('netstat -ano -p tcp', { windowsHide: true, timeout: 10000 }, (err, stdout) => {
+        if (err) { resolve(); return; }
+        const pids = new Set();
+        for (const line of (stdout || '').split(/\r?\n/)) {
+          const parts = line.trim().split(/\s+/);
+          if (parts.length >= 5 &&
+              parts[0].toUpperCase() === 'TCP' &&
+              parts[1] && parts[1].endsWith(`:${port}`) &&
+              parts[3] && parts[3].toUpperCase() === 'LISTENING' &&
+              parts[4]) {
+            pids.add(parts[4]);
+          }
+        }
+        if (pids.size === 0) { resolve(); return; }
+        let remaining = pids.size;
+        const done = () => { if (--remaining === 0) resolve(); };
+        for (const pid of pids) {
+          const k = spawn('taskkill', ['/pid', pid, '/t', '/f'], { stdio: 'ignore', windowsHide: true });
+          k.on('exit', done);
+          k.on('error', done);
+        }
+      });
+    } else {
+      // POSIX：fuser 优先，失败退回 lsof + kill。命令本身 best-effort，忽略退出码。
+      exec(`fuser -k ${port}/tcp 2>/dev/null`, { timeout: 10000 }, () => {
+        exec(`lsof -ti:${port} 2>/dev/null | xargs -r kill -9 2>/dev/null`, { timeout: 10000 }, () => resolve());
+      });
+    }
+  });
+}
+
+/**
+ * 重启 dsh web：停掉当前 dsh、释放端口、重新启动并等待就绪。
+ * 本窗口持有的 dsh 直接 killTree；本窗口未持有的（外部启动/残留）由 freePort 按端口释放，
+ * 调用方需先征得用户确认，避免误杀其他窗口正在使用的 dsh。
  * @returns {Promise<boolean>} 是否重启成功就绪。
  */
 async function restartDsh() {
-  if (!managedChild) {
-    return false;
-  }
-  killTree(managedChild);
-  managedChild = null;
   const url = getUrl();
-  // 等端口真正释放（最多约 5 秒）。
+  // 1. 结束本窗口启动的 dsh 进程树。
+  if (managedChild) {
+    killTree(managedChild);
+    managedChild = null;
+  }
+  // 2. 释放端口（兜底外部启动 / 残留进程）。
+  await freePort(getPort());
+  // 3. 等端口真正释放（最多约 5 秒）。
   for (let i = 0; i < 10; i++) {
     await sleep(500);
     if (!(await checkUrl(url))) break;
   }
+  // 4. 重新启动。
   startDsh();
-  // 等待就绪（最多约 30 秒）。
+  // 5. 等待就绪（最多约 30 秒）。
   for (let i = 0; i < 60; i++) {
     await sleep(500);
     if (await checkUrl(url)) return true;
@@ -665,13 +709,18 @@ function activate(context) {
     }
     const view = activeView;
 
-    // 本窗口不是 dsh 的启动者（仅复用了别处已运行的 dsh）时不重启，
-    // 避免误杀其他 VS Code 窗口正在使用的 dsh web 及其运行中的对话任务。
-    if (!managedChild) {
-      vscode.window.showWarningMessage(
-        '当前 dsh web 不是由本窗口启动的，为避免影响其他窗口正在运行的任务，未在此重启。请到启动它的窗口重启，或点击「在浏览器中打开」。'
+    // dsh 正在运行、且不是本窗口启动时，重启会中断其他窗口的任务，先征得确认。
+    // dsh 未运行、或本就是本窗口启动时，无需确认直接重启/启动。
+    const running = await checkUrl(getUrl());
+    if (running && !managedChild) {
+      const choice = await vscode.window.showWarningMessage(
+        '当前 dsh web 不是由本窗口启动的，重启会中断所有正在使用它的窗口及其任务。确定要重启吗？',
+        { modal: true },
+        '重启'
       );
-      return;
+      if (choice !== '重启') {
+        return;
+      }
     }
 
     view.description = '正在重启';
