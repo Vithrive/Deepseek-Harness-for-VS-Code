@@ -758,7 +758,37 @@ function activate(context) {
     registerWorkspace().catch(() => {});
   });
 
-  context.subscriptions.push(viewSub, refreshCmd, openBrowserCmd, restartCmd, wsSub);
+  // 发送选中内容到 DSH 对话框
+  const sendSelectionCmd = vscode.commands.registerCommand('dsh.sendSelection', async () => {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || !activeView) {
+      vscode.window.showWarningMessage('请先打开 DeepSeek Harness 面板并选中代码');
+      return;
+    }
+    const selection = editor.selection;
+    if (selection.isEmpty) {
+      vscode.window.showWarningMessage('请先选中代码片段');
+      return;
+    }
+    const document = editor.document;
+    const selectedText = document.getText(selection);
+    const filePath = document.uri.fsPath;
+    const startLine = selection.start.line + 1;
+    const endLine = selection.end.line + 1;
+    
+    activeView.webview.postMessage({
+      type: 'insert-selection',
+      filePath: filePath,
+      startLine: startLine,
+      endLine: endLine,
+      content: selectedText,
+      language: document.languageId
+    });
+    
+    vscode.window.showInformationMessage('已发送选中内容到 DSH');
+  });
+
+  context.subscriptions.push(viewSub, refreshCmd, openBrowserCmd, restartCmd, wsSub, sendSelectionCmd);
 }
 
 function deactivate() {

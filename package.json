@@ -2,7 +2,7 @@
   "name": "deepseek-harness-vscode",
   "displayName": "DeepSeek Harness for VSCode",
   "description": "在 VS Code 辅助侧边栏中打开 DeepSeek Harness (DSH) Web GUI，并自动检测与启动 DSH 服务",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "publisher": "vithrive",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -102,9 +102,20 @@
         "command": "dshPanel.restart",
         "title": "DeepSeek Harness: 重启 dsh web",
         "icon": "$(debug-restart)"
+      },
+      {
+        "command": "dsh.sendSelection",
+        "title": "DeepSeek Harness: 发送选中内容到对话框"
       }
     ],
     "menus": {
+      "editor/context": [
+        {
+          "command": "dsh.sendSelection",
+          "when": "editorHasSelection",
+          "group": "9_cutcopypaste@100"
+        }
+      ],
       "view/title": [
         {
           "command": "dshPanel.refresh",
