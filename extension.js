@@ -597,6 +597,11 @@ function buildIframeHtml(url, scale) {
       if (/^https?:\/\//i.test(u)) {
         vscode.postMessage({ type: 'dsh-open-link', url: u });
       }
+    } else if (data.type === 'insert-selection') {
+      // 扩展宿主发来的「选中代码」：转发给 DSH iframe，由 dsh-drop-caret 插件插入对话框。
+      try {
+        frame.contentWindow.postMessage(data, '*');
+      } catch (e) { /* ignore */ }
     }
   });
 }());
