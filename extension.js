@@ -602,8 +602,17 @@ function buildIframeHtml(url, scale) {
     } else if (data.type === 'insert-selection') {
       // 扩展宿主发来的「选中代码」：转发给 DSH iframe，由 dsh-drop-caret 插件插入对话框。
       try {
-        frame.contentWindow.postMessage(data, '*');
-      } catch (e) { /* ignore */ }
+        if (!frame || !frame.contentWindow) {
+          vscode.postMessage({ type: 'insert-selection-ack', status: 'no-frame' });
+        } else {
+          frame.contentWindow.postMessage(data, '*');
+          vscode.postMessage({ type: 'insert-selection-ack', status: 'forwarded' });
+        }
+      } catch (e) {
+        try {
+          vscode.postMessage({ type: 'insert-selection-ack', status: 'error' });
+        } catch (e2) { /* ignore */ }
+      }
     }
   });
 }());
@@ -846,6 +855,14 @@ function activate(context) {
           if (/^https?:\/\//i.test(u)) {
             vscode.env.openExternal(vscode.Uri.parse(u));
           }
+        } else if (msg && msg.type === 'insert-selection-ack') {
+          if (msg.status === 'forwarded') {
+            vscode.window.showInformationMessage('已转发到 DSH 对话框');
+          } else if (msg.status === 'no-frame') {
+            vscode.window.showErrorMessage('转发失败：面板未加载 DSH iframe，请点「刷新」后重试');
+          } else {
+            vscode.window.showErrorMessage('转发失败：未知错误');
+          }
         }
       });
 
@@ -966,7 +983,7 @@ function activate(context) {
     const startLine = selection.start.line + 1;
     const endLine = selection.end.line + 1;
     
-    activeView.webview.postMessage({
+    const ok = await activeView.webview.postMessage({
       type: 'insert-selection',
       filePath: filePath,
       startLine: startLine,
@@ -974,8 +991,12 @@ function activate(context) {
       content: selectedText,
       language: document.languageId
     });
-    
-    vscode.window.showInformationMessage('已发送选中内容到 DSH');
+
+    if (ok) {
+      vscode.window.showInformationMessage('已发送选中内容到 DSH，等待面板转发…');
+    } else {
+      vscode.window.showErrorMessage('发送失败：DSH 面板 webview 未就绪，请先打开面板并等待加载完成');
+    }
   });
 
   context.subscriptions.push(viewSub, refreshCmd, openBrowserCmd, restartCmd, wsSub, sendSelectionCmd);
