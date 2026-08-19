@@ -11,13 +11,13 @@
 1. 从 [GitHub Releases](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest) 下载最新的 `.vsix` 安装包：
 
    ```
-   https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest/download/deepseek-harness-vscode-0.2.12.vsix
+   https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest/download/deepseek-harness-vscode-0.2.13.vsix
    ```
 
 2. 在 VS Code 中安装：
 
    ```bash
-   code --install-extension deepseek-harness-vscode-0.2.12.vsix
+   code --install-extension deepseek-harness-vscode-0.2.13.vsix
    ```
 
    或在 VS Code 中：`Ctrl+Shift+P` → `Extensions: Install from VSIX...` → 选择下载的 `.vsix` 文件。
@@ -39,6 +39,7 @@
 - **字号跟随编辑器**：面板整体等比缩放，从而让 16px 对话正文对齐 VS Code `editor.fontSize`（缩放比例 = `editor.fontSize` / 16，安全夹取到 8..72px / 0.5..2 倍），修改后即时生效，无需重载当前对话
 - 面板顶部提供「刷新」「重启 dsh web」和「在浏览器中打开」按钮：「刷新」仅在服务离线时才重载（在线时只确认状态、不打断对话）；「重启」始终可启动/重启 dsh，仅当 dsh 非本窗口启动时会先弹确认，避免误中断其他窗口正在运行的任务
 - **发送选中代码到 DSH**：选中代码后右键 → `Send to DSH Dialog`，自动插入到 DSH 对话框，支持精确光标定位（v0.2.12）
+- **对话链接外部打开**：点击 DSH 对话中的外部链接会在系统默认浏览器打开，不在 iframe 内导航（v0.2.13，配合 DSH 插件 `dsh-open-links`）
 
 ## 从源码安装（开发模式，零依赖，无需编译）
 
@@ -69,7 +70,7 @@
 ```bash
 cd DeepSeek-Harness-for-VS-Code
 npx --yes @vscode/vsce package --allow-missing-repository
-code --install-extension deepseek-harness-vscode-0.2.12.vsix
+code --install-extension deepseek-harness-vscode-0.2.13.vsix
 ```
 
 ## 配置
@@ -143,7 +144,7 @@ ssh -L 3080:127.0.0.1:3080 user@your-server
 
 ## 分支说明
 
-- `dev-<版本号>`：开发分支，命名与扩展版本号一致（历史 `dev-0.1.0`，当前 `dev-0.2.12`）
+- `dev-<版本号>`：开发分支，命名与扩展版本号一致（历史 `dev-0.1.0`，当前 `dev-0.2.13`）
 - `main`：与最新 `dev-*` 内容保持一致，作为默认分支
 - `.vsix` 安装包通过 [GitHub Releases](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases) 发布
 

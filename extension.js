@@ -574,6 +574,7 @@ function buildIframeHtml(url, scale) {
 (function () {
   var frame = document.getElementById('dsh-frame');
   var current = ${s};
+  var vscode = acquireVsCodeApi();
   function apply(scale) {
     var n = Number(scale);
     if (!isFinite(n)) return;
@@ -587,8 +588,15 @@ function buildIframeHtml(url, scale) {
   }
   window.addEventListener('message', function (event) {
     var data = event.data;
-    if (data && data.type === 'dsh-font-scale' && typeof data.scale === 'number') {
+    if (!data) return;
+    if (data.type === 'dsh-font-scale' && typeof data.scale === 'number') {
       apply(data.scale);
+    } else if (data.type === 'dsh-open-link' && typeof data.url === 'string') {
+      // DSH 页面内点击外部链接：转发给扩展宿主，用系统浏览器打开。
+      var u = data.url;
+      if (/^https?:\/\//i.test(u)) {
+        vscode.postMessage({ type: 'dsh-open-link', url: u });
+      }
     }
   });
 }());
@@ -658,6 +666,17 @@ function activate(context) {
       };
 
       render(view);
+
+      // DSH 页面（iframe）内点击外部链接时，由 dsh-open-links 插件通过
+      // postMessage 逐级转发到这里，用系统默认浏览器打开。
+      view.webview.onDidReceiveMessage((msg) => {
+        if (msg && msg.type === 'dsh-open-link' && typeof msg.url === 'string') {
+          const u = msg.url;
+          if (/^https?:\/\//i.test(u)) {
+            vscode.env.openExternal(vscode.Uri.parse(u));
+          }
+        }
+      });
 
       const cfgSub = vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration('dshPanel')) {
