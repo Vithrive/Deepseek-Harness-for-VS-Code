@@ -11,13 +11,13 @@
 1. 从 [GitHub Releases](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest) 下载最新的 `.vsix` 安装包：
 
    ```
-   https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest/download/deepseek-harness-vscode-0.2.14.vsix
+   https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest/download/deepseek-harness-vscode-0.3.0.vsix
    ```
 
 2. 在 VS Code 中安装：
 
    ```bash
-   code --install-extension deepseek-harness-vscode-0.2.14.vsix
+   code --install-extension deepseek-harness-vscode-0.3.0.vsix
    ```
 
    或在 VS Code 中：`Ctrl+Shift+P` → `Extensions: Install from VSIX...` → 选择下载的 `.vsix` 文件。
@@ -40,6 +40,21 @@
 - 面板顶部提供「刷新」「重启 dsh web」和「在浏览器中打开」按钮：「刷新」仅在服务离线时才重载（在线时只确认状态、不打断对话）；「重启」始终可启动/重启 dsh，仅当 dsh 非本窗口启动时会先弹确认，避免误中断其他窗口正在运行的任务
 - **发送选中代码到 DSH**：选中代码后右键 → `Send to DSH Dialog`，自动插入到 DSH 对话框，支持精确光标定位（v0.2.12）
 - **对话链接外部打开**：点击 DSH 对话中的外部链接会在系统默认浏览器打开，不在 iframe 内导航（v0.2.13，配合 DSH 插件 `dsh-open-links`）
+- **自动安装 DSH 配套插件 `dsh-drop-caret`**（v0.3.0）：打开面板时自动检测并在 DSH 中安装配套插件，实现「把文件/文件夹/选中代码段插入 DSH 对话框」，用户只需安装本扩展
+
+## 为什么自动安装 DSH 插件 `dsh-drop-caret`？
+
+本扩展把 DeepSeek Harness (DSH) 的 Web GUI 内嵌在**跨域 iframe** 中。受浏览器同源安全策略限制，扩展（webview 是 iframe 的父容器）**无法直接操作 DSH 页面内部的输入框**——「把文件/文件夹/代码段插入对话框」这个动作必须由 DSH 页面内部的代码（一个 DSH 插件）来完成。
+
+为了让你**只安装本扩展**就能获得完整能力，扩展会在每次打开面板时自动检查 DSH web profile，若缺少配套插件 `dsh-drop-caret` 则自动安装（优先 `dsh plugin --profile web add dsh-drop-caret`，失败时回退为 npm 拉取并写入 profile），并保持其版本满足要求。该插件实现以下功能：
+
+- **拖放文件**：把文件拖进 DSH 对话框，在拖放点对应的精确光标位置插入路径引用（会话隔离存储，agent 可读）
+- **拖放文件夹**：递归读取文件夹内所有文件并逐个插入引用
+- **VS Code 资源管理器拖拽**：把 VS Code 侧边栏 Explorer 的文件/文件夹直接拖入对话框
+- **发送选中代码段**：在编辑器选中代码 → 右键「DeepSeek Harness: 发送选中内容到对话框」→ 在对话框光标处插入 `路径:起始行-结束行`，模型可定位到该代码段
+- **精确光标定位**：所有插入都发生在拖放点 / 当前光标处，而非简单的末尾追加
+
+> 该插件由本扩展自动安装并保持更新，你无需（也不建议）手动在 DSH 里重复安装。
 
 ## 从源码安装（开发模式，零依赖，无需编译）
 
@@ -70,7 +85,7 @@
 ```bash
 cd DeepSeek-Harness-for-VS-Code
 npx --yes @vscode/vsce package --allow-missing-repository
-code --install-extension deepseek-harness-vscode-0.2.14.vsix
+code --install-extension deepseek-harness-vscode-0.3.0.vsix
 ```
 
 ## 配置
@@ -144,7 +159,7 @@ ssh -L 3080:127.0.0.1:3080 user@your-server
 
 ## 分支说明
 
-- `dev-<版本号>`：开发分支，命名与扩展版本号一致（历史 `dev-0.1.0`，当前 `dev-0.2.14`）
+- `dev-<版本号>`：开发分支，命名与扩展版本号一致（历史 `dev-0.1.0`，当前 `dev-0.3.0`）
 - `main`：与最新 `dev-*` 内容保持一致，作为默认分支
 - `.vsix` 安装包通过 [GitHub Releases](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases) 发布
 

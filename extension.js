@@ -4,6 +4,8 @@ const https = require('https');
 const os = require('os');
 const crypto = require('crypto');
 const { spawn, exec } = require('child_process');
+const path = require('path');
+const fs = require('fs');
 
 const VIEW_ID = 'dsh.webview';
 const DEFAULT_URL = 'http://127.0.0.1:3080';
@@ -619,6 +621,162 @@ function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
+// =====================================================================
+// DSH 配套插件自动安装/管理
+// 架构原因：面板把 DSH Web GUI 内嵌在跨域 iframe 中，扩展（webview 是
+// iframe 的父容器）受安全隔离无法直接操作 DSH 页面内部的输入框。
+// 「拖文件/文件夹/选中代码段插入对话框」必须在 DSH 页面内部由插件接收，
+// 因此扩展自动在 DSH web profile 中补齐配套插件 dsh-drop-caret，
+// 用户只需安装本扩展，无需手动安装 DSH 插件。
+// =====================================================================
+const DSH_PLUGIN_NAME = 'dsh-drop-caret';
+const DSH_PLUGIN_MIN = '0.2.1';
+const NPMJS_REGISTRY = 'https://registry.npmjs.org/';
+
+function dshHomeDir() {
+  return process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+}
+
+function dshWebProfileDir() {
+  return path.join(dshHomeDir(), 'profiles', 'web');
+}
+
+/** 简单版本比较：a >= b 返回 >=0，a < b 返回 <0。 */
+function compareVersions(a, b) {
+  const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
+  const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const da = pa[i] || 0;
+    const db = pb[i] || 0;
+    if (da !== db) return da - db;
+  }
+  return 0;
+}
+
+async function readJsonFile(file) {
+  try {
+    return JSON.parse(await fs.promises.readFile(file, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+async function writeJsonFile(file, obj) {
+  await fs.promises.writeFile(file, JSON.stringify(obj, null, 2) + '\n', 'utf8');
+}
+
+/** 幂等：确保 profile 的 package.json 声明该插件（dependencies + dsh.profile.bundles）。 */
+async function ensureProfileDeclaration(profileDir, plugin, versionSpec) {
+  const pkgFile = path.join(profileDir, 'package.json');
+  const pkg = (await readJsonFile(pkgFile)) || { name: 'dsh-profile-web', private: true, dependencies: {}, dsh: { profile: { bundles: [] } } };
+  pkg.dependencies = pkg.dependencies || {};
+  pkg.dsh = pkg.dsh || {};
+  pkg.dsh.profile = pkg.dsh.profile || {};
+  pkg.dsh.profile.bundles = pkg.dsh.profile.bundles || [];
+  let changed = false;
+  if (!pkg.dependencies[plugin]) {
+    pkg.dependencies[plugin] = versionSpec;
+    changed = true;
+  }
+  if (!pkg.dsh.profile.bundles.includes(plugin)) {
+    pkg.dsh.profile.bundles.push(plugin);
+    changed = true;
+  }
+  if (changed) await writeJsonFile(pkgFile, pkg);
+}
+
+/** 读取已安装插件版本；未安装返回 null。 */
+async function installedPluginVersion(profileDir, plugin) {
+  const pkg = await readJsonFile(path.join(profileDir, 'node_modules', plugin, 'package.json'));
+  return pkg && pkg.version ? pkg.version : null;
+}
+
+/** 用 npm pack 拉取插件并解压到 profile 的 node_modules（不依赖 pnpm）。 */
+async function installPluginViaNpm(profileDir, plugin) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-plugin-'));
+  try {
+    const packOut = await new Promise((resolve, reject) => {
+      exec(
+        `npm pack ${plugin} --pack-destination "${tmp}" --registry ${NPMJS_REGISTRY} --json`,
+        { timeout: 180000, windowsHide: true },
+        (err, stdout) => (err ? reject(new Error((stdout || '').trim() || err.message)) : resolve(stdout))
+      );
+    });
+    const parsed = JSON.parse(packOut);
+    const tarball = parsed && parsed[0] && parsed[0].filename ? parsed[0].filename : null;
+    if (!tarball) throw new Error('npm pack 未能解析 tarball 文件名');
+    const extractDir = path.join(tmp, 'extract');
+    await fs.promises.mkdir(extractDir, { recursive: true });
+    await new Promise((resolve, reject) => {
+      exec(`tar -xzf "${path.join(tmp, tarball)}" -C "${extractDir}"`, { timeout: 60000, windowsHide: true }, (err) => (err ? reject(err) : resolve()));
+    });
+    const pkgSrc = path.join(extractDir, 'package');
+    const dest = path.join(profileDir, 'node_modules', plugin);
+    await fs.promises.rm(dest, { recursive: true, force: true });
+    await fs.promises.cp(pkgSrc, dest, { recursive: true });
+    return true;
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+/** 尝试用官方 dsh plugin add 安装（依赖 dsh + pnpm）；成功返回 true。 */
+function tryDshPluginAdd(plugin) {
+  return new Promise((resolve) => {
+    const cmd = process.platform === 'win32' ? 'dsh.cmd' : 'dsh';
+    const env = Object.assign({}, process.env, {
+      // npm 全局 bin 前置，避开旧 corepack shim 干扰 pnpm
+      Path: path.join(os.homedir(), 'AppData', 'Roaming', 'npm') + path.delimiter + (process.env.Path || process.env.PATH || ''),
+      npm_config_registry: NPMJS_REGISTRY
+    });
+    const child = spawn(cmd, ['plugin', '--profile', 'web', 'add', plugin], {
+      stdio: 'ignore',
+      env,
+      windowsHide: true,
+      shell: process.platform === 'win32'
+    });
+    let done = false;
+    const finish = (ok) => {
+      if (!done) {
+        done = true;
+        resolve(ok);
+      }
+    };
+    child.on('error', () => finish(false));
+    child.on('exit', (code) => finish(code === 0));
+    setTimeout(() => {
+      try { child.kill(); } catch (_) { /* noop */ }
+      finish(false);
+    }, 180000);
+  });
+}
+
+/**
+ * 确保 DSH web profile 已安装并声明 dsh-drop-caret 插件。
+ * @returns {Promise<boolean>} 本次是否发生了新增/升级安装（true 时通常需重启 dsh web 生效）。
+ */
+async function ensureDshPlugins() {
+  const profileDir = dshWebProfileDir();
+  try {
+    const installed = await installedPluginVersion(profileDir, DSH_PLUGIN_NAME);
+    await ensureProfileDeclaration(profileDir, DSH_PLUGIN_NAME, `^${DSH_PLUGIN_MIN}`);
+    if (installed && compareVersions(installed, DSH_PLUGIN_MIN) >= 0) {
+      return false; // 已满足，无需安装
+    }
+    // 未安装或版本过低：先试官方 dsh plugin add，失败回退 npm pack。
+    const viaCli = await tryDshPluginAdd(DSH_PLUGIN_NAME);
+    if (!viaCli) {
+      await installPluginViaNpm(profileDir, DSH_PLUGIN_NAME);
+    }
+    await ensureProfileDeclaration(profileDir, DSH_PLUGIN_NAME, `^${DSH_PLUGIN_MIN}`);
+    return true;
+  } catch (e) {
+    console.error(`[DeepSeek Harness] 自动安装 ${DSH_PLUGIN_NAME} 失败：`, e);
+    vscode.window.showWarningMessage(`自动安装 DSH 插件 ${DSH_PLUGIN_NAME} 失败：${e.message}`);
+    return false;
+  }
+}
+
 async function render(view) {
   view.description = getUrl();
   view.webview.html = buildLoadingHtml();
@@ -632,6 +790,14 @@ async function render(view) {
       '未检测到 DeepSeek Harness (dsh)，且已取消安装。请手动安装后点击“刷新”。'
     );
     return;
+  }
+
+  // 自动确保 DSH 侧配套插件 dsh-drop-caret 在位（拖文件/代码段插入对话框）。
+  const pluginInstalled = await ensureDshPlugins();
+  if (activeView !== view) return;
+  if (pluginInstalled && (await checkUrl(getUrl()))) {
+    // 服务已在运行但插件刚装上，需重启 dsh web 才加载。
+    vscode.window.showInformationMessage('已自动安装 DSH 插件 dsh-drop-caret，请点击面板顶部的「重启 dsh web」使其生效。');
   }
 
   const ok = await ensureRunningOnce();
