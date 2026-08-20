@@ -19,6 +19,8 @@ let ensurePromise = null;
 // 解析出的 dsh 启动方式：{ cmd, prefix }。null 表示尚未解析或都不可用。
 // 优先全局安装（dsh 命令），其次 npx 缓存安装（npx 安装不会写入全局 PATH）。
 let dshInvocation = null;
+// 编辑器标签页模式：当前打开的 DSH 标签页 panel（未打开时为 null）。
+let activeTab = null;
 
 /**
  * 读取配置。
@@ -789,53 +791,110 @@ async function ensureDshPlugins() {
   }
 }
 
-async function render(view) {
-  view.description = getUrl();
-  view.webview.html = buildLoadingHtml();
+/**
+ * 处理 webview 消息：DSH 页面内点击外部链接用系统浏览器打开；发送选中内容回执提示。
+ * 侧边栏面板与编辑器标签页共用。
+ * @param {any} msg
+ */
+function handleWebviewMessage(msg) {
+  if (msg && msg.type === 'dsh-open-link' && typeof msg.url === 'string') {
+    const u = msg.url;
+    if (/^https?:\/\//i.test(u)) {
+      vscode.env.openExternal(vscode.Uri.parse(u));
+    }
+  } else if (msg && msg.type === 'insert-selection-ack') {
+    if (msg.status === 'forwarded') {
+      vscode.window.showInformationMessage('已转发到 DSH 对话框');
+    } else if (msg.status === 'no-frame') {
+      vscode.window.showErrorMessage('转发失败：面板未加载 DSH iframe，请点「刷新」后重试');
+    } else {
+      vscode.window.showErrorMessage('转发失败：未知错误');
+    }
+  }
+}
 
+/**
+ * 标签页专用显示地址：本地场景把 host 在 127.0.0.1 与 localhost 之间互换，
+ * 制造与侧边栏不同的 origin，避免两个 webview 同 origin 时 DSH 前端的插件加载互斥。
+ * 仅当 host 为 127.0.0.1 或 localhost 时互换；其它地址（如远程转发域名）原样返回。
+ * @param {string} displayUrl
+ * @returns {string}
+ */
+function getTabDisplayUrl(displayUrl) {
+  try {
+    const u = new URL(displayUrl);
+    if (u.hostname === '127.0.0.1') {
+      u.hostname = 'localhost';
+      return u.toString();
+    }
+    if (u.hostname === 'localhost') {
+      u.hostname = '127.0.0.1';
+      return u.toString();
+    }
+    return displayUrl;
+  } catch {
+    return displayUrl;
+  }
+}
+
+/**
+ * 准备面板内容 HTML：确保 dsh 已安装、配套插件在位、服务就绪，
+ * 返回 iframe HTML 或错误。侧边栏视图与编辑器标签页共用。
+ * @param {boolean} [isTab] 是否为标签页模式（标签页用不同 origin 以与侧边栏隔离）。
+ * @returns {Promise<{ok: true, html: string} | {ok: false, kind: 'not-installed'|'unreachable'|'unloadable', reason: string}>}
+ */
+async function preparePanelHtml(isTab) {
   // 先确保 dsh 已安装（远程场景即在服务器上检查/安装）。
   const installed = await ensureDshInstalled();
-  if (activeView !== view) return;
   if (!installed) {
-    view.description = '未安装 dsh';
-    view.webview.html = buildErrorHtml(
-      '未检测到 DeepSeek Harness (dsh)，且已取消安装。请手动安装后点击“刷新”。'
-    );
-    return;
+    return {
+      ok: false,
+      kind: 'not-installed',
+      reason: '未检测到 DeepSeek Harness (dsh)，且已取消安装。请手动安装后点击“刷新”。'
+    };
   }
 
   // 自动确保 DSH 侧配套插件 dsh-drop-caret 在位（拖文件/代码段插入对话框）。
   const pluginInstalled = await ensureDshPlugins();
-  if (activeView !== view) return;
   if (pluginInstalled && (await checkUrl(getUrl()))) {
     // 服务已在运行但插件刚装上，需重启 dsh web 才加载。
     vscode.window.showInformationMessage('已自动安装 DSH 插件 dsh-drop-caret，请点击面板顶部的「重启 dsh web」使其生效。');
   }
 
   const ok = await ensureRunningOnce();
+  if (!ok) {
+    return {
+      ok: false,
+      kind: 'unreachable',
+      reason: `无法连接 ${getUrl()}，且自动启动未成功（或已关闭自动启动）。`
+    };
+  }
+
+  // 服务就绪后，尽力把 VSCode 当前工作区注册进 DSH 工作区列表（不阻塞渲染）。
+  registerWorkspace().catch(() => {});
+  // iframe 用显示地址（远程场景经端口转发），检测/API 仍用服务地址。
+  const displayUrl = isTab ? getTabDisplayUrl(await resolveDisplayUrl()) : await resolveDisplayUrl();
+  try {
+    return { ok: true, html: buildIframeHtml(displayUrl, getFontScale()) };
+  } catch (e) {
+    // 显示地址无法解析或协议不是 http/https 时，拒绝加载 iframe 并展示错误页。
+    return { ok: false, kind: 'unloadable', reason: e.message };
+  }
+}
+
+async function render(view) {
+  view.description = getUrl();
+  view.webview.html = buildLoadingHtml();
+  const r = await preparePanelHtml(false);
   // await 期间视图可能已被关闭；只有仍是当前活动视图时才继续渲染。
   if (activeView !== view) return;
-
-  if (ok) {
-    // 服务就绪后，尽力把 VSCode 当前工作区注册进 DSH 工作区列表（不阻塞渲染）。
-    registerWorkspace().catch(() => {});
-    // iframe 用显示地址（远程场景经端口转发），检测/API 仍用服务地址。
-    const displayUrl = await resolveDisplayUrl();
-    if (activeView !== view) return;
-    view.description = getUrl();
-    try {
-      view.webview.html = buildIframeHtml(displayUrl, getFontScale());
-    } catch (e) {
-      // 显示地址无法解析或协议不是 http/https 时，拒绝加载 iframe 并展示错误页。
-      view.description = '无法加载';
-      view.webview.html = buildErrorHtml(e.message);
-    }
-  } else {
-    view.description = '未连接';
-    view.webview.html = buildErrorHtml(
-      `无法连接 ${getUrl()}，且自动启动未成功（或已关闭自动启动）。`
-    );
+  if (!r.ok) {
+    view.description = r.kind === 'not-installed' ? '未安装 dsh' : (r.kind === 'unloadable' ? '无法加载' : '未连接');
+    view.webview.html = buildErrorHtml(r.reason);
+    return;
   }
+  view.description = getUrl();
+  view.webview.html = r.html;
 }
 
 function activate(context) {
@@ -852,22 +911,7 @@ function activate(context) {
 
       // DSH 页面（iframe）内点击外部链接时，由 dsh-open-links 插件通过
       // postMessage 逐级转发到这里，用系统默认浏览器打开。
-      view.webview.onDidReceiveMessage((msg) => {
-        if (msg && msg.type === 'dsh-open-link' && typeof msg.url === 'string') {
-          const u = msg.url;
-          if (/^https?:\/\//i.test(u)) {
-            vscode.env.openExternal(vscode.Uri.parse(u));
-          }
-        } else if (msg && msg.type === 'insert-selection-ack') {
-          if (msg.status === 'forwarded') {
-            vscode.window.showInformationMessage('已转发到 DSH 对话框');
-          } else if (msg.status === 'no-frame') {
-            vscode.window.showErrorMessage('转发失败：面板未加载 DSH iframe，请点「刷新」后重试');
-          } else {
-            vscode.window.showErrorMessage('转发失败：未知错误');
-          }
-        }
-      });
+      view.webview.onDidReceiveMessage(handleWebviewMessage);
 
       const cfgSub = vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration('dshPanel')) {
@@ -889,6 +933,57 @@ function activate(context) {
 
   const viewSub = vscode.window.registerWebviewViewProvider(VIEW_ID, provider, {
     webviewOptions: { retainContextWhenHidden: true }
+  });
+
+  // 编辑器标签页模式：在编辑器区域以标签页打开 DSH（页面宽度最大化、可右键 Pin 住）。
+  // 复用侧边栏的渲染与消息逻辑，单例：已打开则聚焦，未打开则新建。
+  const openInTabCmd = vscode.commands.registerCommand('dshPanel.openInTab', async () => {
+    if (activeTab) {
+      activeTab.reveal();
+      return;
+    }
+    // 在当前活跃编辑器所在的列打开（不另开一栏）；无活跃编辑器时用第一列。
+    const column = (vscode.window.activeTextEditor && vscode.window.activeTextEditor.viewColumn) || vscode.ViewColumn.One;
+    const panel = vscode.window.createWebviewPanel(
+      'dsh.tab',
+      'DeepSeek Harness',
+      column,
+      { enableScripts: true, retainContextWhenHidden: true }
+    );
+    activeTab = panel;
+    let disposed = false;
+    const reloadTab = async () => {
+      if (disposed) return;
+      panel.webview.html = buildLoadingHtml();
+      try {
+        const r = await preparePanelHtml(true);
+        if (disposed) return;
+        panel.webview.html = r.ok ? r.html : buildErrorHtml(r.reason);
+      } catch (e) {
+        if (disposed) return;
+        console.error('[DeepSeek Harness] 标签页渲染失败：', e);
+        panel.webview.html = buildErrorHtml('标签页渲染失败：' + (e && e.message ? e.message : String(e)));
+      }
+    };
+
+    const cfgSub = vscode.workspace.onDidChangeConfiguration((e) => {
+      if (disposed) return;
+      if (e.affectsConfiguration('dshPanel')) {
+        reloadTab();
+      } else if (e.affectsConfiguration('editor.fontSize')) {
+        // 仅字号变化时不重载 iframe（避免打断当前对话），只推送新的缩放值。
+        panel.webview.postMessage({ type: 'dsh-font-scale', scale: getFontScale() });
+      }
+    });
+
+    panel.onDidDispose(() => {
+      disposed = true;
+      cfgSub.dispose();
+      if (activeTab === panel) activeTab = null;
+    });
+    panel.webview.onDidReceiveMessage(handleWebviewMessage);
+
+    await reloadTab();
   });
 
   const refreshCmd = vscode.commands.registerCommand('dshPanel.refresh', () => {
@@ -964,8 +1059,10 @@ function activate(context) {
   // 发送选中内容到 DSH 对话框
   const sendSelectionCmd = vscode.commands.registerCommand('dsh.sendSelection', async () => {
     const editor = vscode.window.activeTextEditor;
-    if (!editor || !activeView) {
-      vscode.window.showWarningMessage('请先打开 DeepSeek Harness 面板并选中代码');
+    // 发送目标：优先编辑器标签页，其次侧边栏面板。
+    const target = activeTab || activeView;
+    if (!editor || !target) {
+      vscode.window.showWarningMessage('请先打开 DeepSeek Harness 面板或标签页并选中代码');
       return;
     }
     const selection = editor.selection;
@@ -979,7 +1076,7 @@ function activate(context) {
     const startLine = selection.start.line + 1;
     const endLine = selection.end.line + 1;
     
-    const ok = await activeView.webview.postMessage({
+    const ok = await target.webview.postMessage({
       type: 'insert-selection',
       filePath: filePath,
       startLine: startLine,
@@ -995,7 +1092,7 @@ function activate(context) {
     }
   });
 
-  context.subscriptions.push(viewSub, refreshCmd, openBrowserCmd, restartCmd, wsSub, sendSelectionCmd);
+  context.subscriptions.push(viewSub, openInTabCmd, refreshCmd, openBrowserCmd, restartCmd, wsSub, sendSelectionCmd);
 }
 
 function deactivate() {
