@@ -596,7 +596,10 @@ function buildIframeHtml(url, scale) {
     } else if (data.type === 'dsh-open-link' && typeof data.url === 'string') {
       // DSH 页面内点击外部链接：转发给扩展宿主，用系统浏览器打开。
       var u = data.url;
-      if (/^https?:\/\//i.test(u)) {
+      // 注意：此处必须写成 \\/\\/ —— 模板字面量会把 \/ 折叠成 /，
+      // 若写成 \/\/ 则注入的脚本变成 /^https?:///i，整段内联脚本语法错误，
+      // 导致 insert-selection 消息监听器注册失败（发送选中内容不生效）。
+      if (/^https?:\\/\\//i.test(u)) {
         vscode.postMessage({ type: 'dsh-open-link', url: u });
       }
     } else if (data.type === 'insert-selection') {
