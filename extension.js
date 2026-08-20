@@ -891,21 +891,14 @@ function activate(context) {
     webviewOptions: { retainContextWhenHidden: true }
   });
 
-  const refreshCmd = vscode.commands.registerCommand('dshPanel.refresh', async () => {
-    if (!activeView) {
+  const refreshCmd = vscode.commands.registerCommand('dshPanel.refresh', () => {
+    if (activeView) {
+      // 始终重载面板页面：render 会重建 iframe 重新加载 DSH Web GUI；
+      // 服务在线时 ensureRunningOnce 仅复用不重启，不影响 dsh web 进程与运行中的任务。
+      render(activeView);
+    } else {
       vscode.window.showInformationMessage('DeepSeek Harness 面板尚未打开，请先点击侧边栏图标。');
-      return;
     }
-    const view = activeView;
-    // 服务在线：不重载 iframe（避免打断正在运行的对话），仅确认状态并同步工作区。
-    if (await checkUrl(getUrl())) {
-      view.description = getUrl();
-      registerWorkspace().catch(() => {});
-      vscode.window.showInformationMessage('DeepSeek Harness: 服务已连接，无需重载（运行中的任务不受影响）。');
-      return;
-    }
-    // 服务离线：走完整渲染（自动启动 + 重载 iframe）。
-    render(view);
   });
 
   const openBrowserCmd = vscode.commands.registerCommand('dshPanel.openInBrowser', () => {

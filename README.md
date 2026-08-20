@@ -15,13 +15,13 @@
 1. 从 [GitHub Releases](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest) 下载最新的 `.vsix` 安装包：
 
    ```
-   https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest/download/deepseek-harness-vscode-0.3.3.vsix
+   https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest/download/deepseek-harness-vscode-0.3.4.vsix
    ```
 
 2. 在 VS Code 中安装：
 
    ```bash
-   code --install-extension deepseek-harness-vscode-0.3.3.vsix
+   code --install-extension deepseek-harness-vscode-0.3.4.vsix
    ```
 
    或在 VS Code 中：`Ctrl+Shift+P` → `Extensions: Install from VSIX...` → 选择下载的 `.vsix` 文件。
@@ -41,7 +41,7 @@
 - **远程（vscode-server）支持**：在 Remote-SSH / Dev Containers 等远程场景下运行，自动检测并安装服务器端的 dsh，并通过端口转发把 DSH 面板接入本地 VS Code
 - **就绪等待**：启动后自动轮询等待服务就绪，再渲染界面，避免白屏
 - **字号跟随编辑器**：面板整体等比缩放，从而让 16px 对话正文对齐 VS Code `editor.fontSize`（缩放比例 = `editor.fontSize` / 16，安全夹取到 8..72px / 0.5..2 倍），修改后即时生效，无需重载当前对话
-- 面板顶部提供「刷新」「重启 dsh web」和「在浏览器中打开」按钮：「刷新」仅在服务离线时才重载（在线时只确认状态、不打断对话）；「重启」始终可启动/重启 dsh，仅当 dsh 非本窗口启动时会先弹确认，避免误中断其他窗口正在运行的任务
+- 面板顶部提供「刷新」「重启 dsh web」和「在浏览器中打开」按钮：「刷新」会重新加载内嵌的 DSH 页面（不影响 dsh web 服务与运行中的任务）；「重启」始终可启动/重启 dsh，仅当 dsh 非本窗口启动时会先弹确认，避免误中断其他窗口正在运行的任务
 - **发送选中代码到 DSH**：选中代码后右键 → 「DeepSeek Harness: 发送选中内容到对话框」，自动插入到 DSH 对话框，支持精确光标定位（v0.2.12；v0.3.2 修复该功能不生效的问题，详见下方[使用示例](#使用示例发送选中内容到对话框)）
 - **对话链接外部打开**：点击 DSH 对话中的外部链接会在系统默认浏览器打开，不在 iframe 内导航（v0.2.13，配合 DSH 插件 `dsh-open-links`）
 - **自动安装 DSH 配套插件 `dsh-drop-caret`**（v0.3.0）：打开面板时自动检测并在 DSH 中安装配套插件，实现「把文件/文件夹/选中代码段插入 DSH 对话框」，用户只需安装本扩展
@@ -106,7 +106,7 @@
 ```bash
 cd DeepSeek-Harness-for-VS-Code
 npx --yes @vscode/vsce package --allow-missing-repository
-code --install-extension deepseek-harness-vscode-0.3.3.vsix
+code --install-extension deepseek-harness-vscode-0.3.4.vsix
 ```
 
 ## 配置
