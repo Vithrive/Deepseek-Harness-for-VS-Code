@@ -8,16 +8,20 @@
 
 ## 快速安装（下载 .vsix）
 
+> 最简单的方式：在 VS Code 扩展市场搜索 **DeepSeek Harness for VSCode** 一键安装（[Marketplace 页面](https://marketplace.visualstudio.com/items?itemName=vithrive.deepseek-harness-vscode)）。
+
+也可以从 GitHub 手动下载安装：
+
 1. 从 [GitHub Releases](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest) 下载最新的 `.vsix` 安装包：
 
    ```
-   https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest/download/deepseek-harness-vscode-0.3.2.vsix
+   https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest/download/deepseek-harness-vscode-0.3.3.vsix
    ```
 
 2. 在 VS Code 中安装：
 
    ```bash
-   code --install-extension deepseek-harness-vscode-0.3.2.vsix
+   code --install-extension deepseek-harness-vscode-0.3.3.vsix
    ```
 
    或在 VS Code 中：`Ctrl+Shift+P` → `Extensions: Install from VSIX...` → 选择下载的 `.vsix` 文件。
@@ -38,7 +42,7 @@
 - **就绪等待**：启动后自动轮询等待服务就绪，再渲染界面，避免白屏
 - **字号跟随编辑器**：面板整体等比缩放，从而让 16px 对话正文对齐 VS Code `editor.fontSize`（缩放比例 = `editor.fontSize` / 16，安全夹取到 8..72px / 0.5..2 倍），修改后即时生效，无需重载当前对话
 - 面板顶部提供「刷新」「重启 dsh web」和「在浏览器中打开」按钮：「刷新」仅在服务离线时才重载（在线时只确认状态、不打断对话）；「重启」始终可启动/重启 dsh，仅当 dsh 非本窗口启动时会先弹确认，避免误中断其他窗口正在运行的任务
-- **发送选中代码到 DSH**：选中代码后右键 → `Send to DSH Dialog`，自动插入到 DSH 对话框，支持精确光标定位（v0.2.12）
+- **发送选中代码到 DSH**：选中代码后右键 → 「DeepSeek Harness: 发送选中内容到对话框」，自动插入到 DSH 对话框，支持精确光标定位（v0.2.12；v0.3.2 修复该功能不生效的问题，详见下方[使用示例](#使用示例发送选中内容到对话框)）
 - **对话链接外部打开**：点击 DSH 对话中的外部链接会在系统默认浏览器打开，不在 iframe 内导航（v0.2.13，配合 DSH 插件 `dsh-open-links`）
 - **自动安装 DSH 配套插件 `dsh-drop-caret`**（v0.3.0）：打开面板时自动检测并在 DSH 中安装配套插件，实现「把文件/文件夹/选中代码段插入 DSH 对话框」，用户只需安装本扩展
 
@@ -55,6 +59,23 @@
 - **精确光标定位**：所有插入都发生在拖放点 / 当前光标处，而非简单的末尾追加
 
 > 该插件由本扩展自动安装并保持更新，你无需（也不建议）手动在 DSH 里重复安装。
+
+## 使用示例：发送选中内容到对话框
+
+拖拽 / 右键发送是 `dsh-drop-caret` 最常用的能力，操作如下：
+
+1. 在 VS Code 中**框选住代码块 / 文字块**；
+2. **右键**，点击 **「DeepSeek Harness: 发送选中内容到对话框」**：
+
+   ![右键菜单：发送选中内容到对话框](media/send-selection-menu.png)
+
+3. 该脚本对应代码块所在行数的链接（`路径:起始行-结束行`）就会被发送到对话框，插入在当前光标位置：
+
+   ![发送结果出现在 DSH 对话框中](media/send-selection-result.png)
+
+4. 在 DSH 里直接发送消息即可，模型可通过引用精确定位到代码块所在文件与行号。
+
+> 同样地，也可以把文件 / 文件夹从系统文件管理器或 VS Code 资源管理器**直接拖进**对话框，插入位置同样是拖放点对应的光标位置。
 
 ## 从源码安装（开发模式，零依赖，无需编译）
 
@@ -85,7 +106,7 @@
 ```bash
 cd DeepSeek-Harness-for-VS-Code
 npx --yes @vscode/vsce package --allow-missing-repository
-code --install-extension deepseek-harness-vscode-0.3.2.vsix
+code --install-extension deepseek-harness-vscode-0.3.3.vsix
 ```
 
 ## 配置
