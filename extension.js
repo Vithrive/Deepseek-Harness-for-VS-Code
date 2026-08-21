@@ -545,6 +545,39 @@ function buildErrorHtml(reason) {
 </html>`;
 }
 
+/**
+ * 标签页模式下的侧边栏占位页：DSH 已由标签页接管，侧边栏不再重复加载，
+ * 避免两个 webview 同时加载 DSH 导致插件加载互斥（DSH 前端在 webview 双实例场景的限制）。
+ */
+function buildSuspendedHtml() {
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--vscode-editor-font-family, -apple-system, 'Segoe UI', sans-serif);
+    font-size: var(--vscode-editor-font-size, 13px);
+    color: var(--vscode-foreground);
+    background: var(--vscode-editor-background);
+  }
+  .box { text-align: center; max-width: 80%; }
+  .title { font-weight: 600; }
+  .sub { margin-top: 8px; color: var(--vscode-descriptionForeground); }
+</style>
+</head>
+<body>
+  <div class="box">
+    <div class="title">DeepSeek Harness 已在标签页中打开</div>
+    <div class="sub">关闭标签页后，本侧边栏面板会自动恢复加载。</div>
+  </div>
+</body>
+</html>`;
+}
+
 function buildIframeHtml(url, scale) {
   // 解析显示地址，仅放行 http/https，并把其精确 origin 写入 frame-src，
   // 不再通配整个本机回环地址段，保持 webview 沙箱最小权限。
@@ -883,6 +916,12 @@ async function preparePanelHtml(isTab) {
 }
 
 async function render(view) {
+  // 标签页已接管 DSH 时，侧边栏不再重复加载（避免双 webview 插件加载互斥），显示占位。
+  if (activeTab) {
+    view.description = '在标签页中打开';
+    view.webview.html = buildSuspendedHtml();
+    return;
+  }
   view.description = getUrl();
   view.webview.html = buildLoadingHtml();
   const r = await preparePanelHtml(false);
@@ -951,6 +990,11 @@ function activate(context) {
       { enableScripts: true, retainContextWhenHidden: true }
     );
     activeTab = panel;
+    // 标签页接管 DSH：侧边栏若已打开则改为占位，避免双 webview 同时加载 DSH 互斥。
+    if (activeView) {
+      activeView.description = '在标签页中打开';
+      activeView.webview.html = buildSuspendedHtml();
+    }
     let disposed = false;
     const reloadTab = async () => {
       if (disposed) return;
@@ -980,6 +1024,10 @@ function activate(context) {
       disposed = true;
       cfgSub.dispose();
       if (activeTab === panel) activeTab = null;
+      // 标签页关闭后，恢复侧边栏（若侧边栏仍存在）。
+      if (activeView) {
+        render(activeView);
+      }
     });
     panel.webview.onDidReceiveMessage(handleWebviewMessage);
 

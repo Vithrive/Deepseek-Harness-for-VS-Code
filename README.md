@@ -15,13 +15,13 @@
 1. 从 [GitHub Releases](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest) 下载最新的 `.vsix` 安装包：
 
    ```
-   https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest/download/deepseek-harness-vscode-0.3.5.vsix
+   https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest/download/deepseek-harness-vscode-0.3.6.vsix
    ```
 
 2. 在 VS Code 中安装：
 
    ```bash
-   code --install-extension deepseek-harness-vscode-0.3.5.vsix
+   code --install-extension deepseek-harness-vscode-0.3.6.vsix
    ```
 
    或在 VS Code 中：`Ctrl+Shift+P` → `Extensions: Install from VSIX...` → 选择下载的 `.vsix` 文件。
@@ -34,7 +34,7 @@
 
 - 在 Activity Bar 中新增「DeepSeek Harness」图标，点击后打开内嵌面板
 - 支持把面板移动到**辅助侧边栏**（右键图标 → Move to Secondary Side Bar，或直接拖拽）
-- **标签页模式**：通过「DeepSeek Harness: 在标签页中打开」（面板标题栏按钮或命令面板）在编辑器区域以标签页打开 DSH，页面宽度最大化，标签页可右键 **Pin 住**（v0.3.5）
+- **标签页模式**：通过「DeepSeek Harness: 在标签页中打开」（面板标题栏按钮或命令面板）在编辑器区域以标签页打开 DSH，页面宽度最大化，标签页可右键 **Pin 住**；标签页打开时侧边栏自动让位显示占位、关闭标签页后自动恢复（v0.3.5）
 - **自动检测**：打开面板时探测 `dshPanel.url` 是否可访问
 - **自动启动**：检测到未运行时，自动执行 `dsh web --host <host> --port <port>` 启动 DSH
 - **工作区自动绑定**：启动 dsh 时使用 VS Code 当前打开的工作区文件夹作为 dsh 工作目录（无工作区则退回用户主目录）
@@ -107,7 +107,7 @@
 ```bash
 cd DeepSeek-Harness-for-VS-Code
 npx --yes @vscode/vsce package --allow-missing-repository
-code --install-extension deepseek-harness-vscode-0.3.5.vsix
+code --install-extension deepseek-harness-vscode-0.3.6.vsix
 ```
 
 ## 配置
@@ -181,7 +181,7 @@ ssh -L 3080:127.0.0.1:3080 user@your-server
 
 ## 分支说明
 
-- `dev-<版本号>`：开发分支，命名与扩展版本号一致（历史 `dev-0.1.0`，当前 `dev-0.3.5`）
+- `dev-<版本号>`：开发分支，命名与扩展版本号一致（历史 `dev-0.1.0`，当前 `dev-0.3.6`）
 - `main`：与最新 `dev-*` 内容保持一致，作为默认分支
 - `.vsix` 安装包通过 [GitHub Releases](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases) 发布
 
