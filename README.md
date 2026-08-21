@@ -15,13 +15,13 @@
 1. 从 [GitHub Releases](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest) 下载最新的 `.vsix` 安装包：
 
    ```
-   https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest/download/deepseek-harness-vscode-0.3.6.vsix
+   https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest/download/deepseek-harness-vscode-0.3.7.vsix
    ```
 
 2. 在 VS Code 中安装：
 
    ```bash
-   code --install-extension deepseek-harness-vscode-0.3.6.vsix
+   code --install-extension deepseek-harness-vscode-0.3.7.vsix
    ```
 
    或在 VS Code 中：`Ctrl+Shift+P` → `Extensions: Install from VSIX...` → 选择下载的 `.vsix` 文件。
@@ -107,7 +107,7 @@
 ```bash
 cd DeepSeek-Harness-for-VS-Code
 npx --yes @vscode/vsce package --allow-missing-repository
-code --install-extension deepseek-harness-vscode-0.3.6.vsix
+code --install-extension deepseek-harness-vscode-0.3.7.vsix
 ```
 
 ## 配置
@@ -181,7 +181,7 @@ ssh -L 3080:127.0.0.1:3080 user@your-server
 
 ## 分支说明
 
-- `dev-<版本号>`：开发分支，命名与扩展版本号一致（历史 `dev-0.1.0`，当前 `dev-0.3.6`）
+- `dev-<版本号>`：开发分支，命名与扩展版本号一致（历史 `dev-0.1.0`，当前 `dev-0.3.7`）
 - `main`：与最新 `dev-*` 内容保持一致，作为默认分支
 - `.vsix` 安装包通过 [GitHub Releases](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases) 发布
 
@@ -189,3 +189,11 @@ ssh -L 3080:127.0.0.1:3080 user@your-server
 
 - 已安装 DeepSeek Harness：支持 `npm install -g @deepseek-ai/dsh` 全局安装，也支持 `npx @deepseek-ai/dsh` 安装（包只缓存在 npx 目录、不写全局 PATH 也能识别）；扩展会自动检测这两种方式，也可通过 `dshPanel.dshCommand` 指定完整路径
 - 实测 DSH 默认响应头未设置 `X-Frame-Options` / 严格 `CSP`，可被 iframe 正常内嵌
+
+## 已知限制
+
+**标签页与侧边栏暂不能同时加载 DSH**：当 DSH 被 VS Code 的多个 webview（侧边栏 + 编辑器标签页）同时加载时，后加载的一个会卡在「loading plugins」。
+
+原因：DSH 前端在 VS Code 的 webview 多实例场景下退化为单例——而普通浏览器多开 tab 是正常的，其它同类扩展（如 Kimi Code）双 webview 同开也正常，说明这是 DSH 前端实现层面的问题，并非 VS Code 环境限制（详见 [DSH 团队 discussions](https://github.com/deepseek-ai/deepseek-harness/discussions) 反馈）。
+
+本扩展采用「单活动视图」策略规避：打开标签页时侧边栏自动让位显示占位，关闭标签页后侧边栏自动恢复。要实现真正的并存，需要 DSH 前端支持 webview 多实例。
