@@ -943,7 +943,7 @@ function escapeHtml(s) {
 // 用户只需安装本扩展，无需手动安装 DSH 插件。
 // =====================================================================
 const DSH_PLUGIN_NAME = 'dsh-drop-caret';
-const DSH_PLUGIN_MIN = '0.2.1';
+const DSH_PLUGIN_MIN = '0.2.2';
 const NPMJS_REGISTRY = 'https://registry.npmjs.org/';
 
 function dshHomeDir() {
