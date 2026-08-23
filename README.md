@@ -3,13 +3,13 @@
 一个零依赖的 VS Code 扩展，把 **DeepSeek Harness (DSH)** 接入 VS Code 的两种形态：
 
 1. **忠实窗口**：把 DSH 的 Web GUI 原样内嵌到 VS Code 侧边栏 / 辅助侧边栏 / 编辑器标签页，自动检测、启动 DSH 服务；
-2. **Copilot 桥接（v0.7.13 起）**：把 DSH 注册为 VS Code 聊天模型——模型选择器里出现 **DSH (DeepSeek Harness)**，选中它提问，Copilot 组织好的现成对话经「滤除杂音」后交给 DSH + DeepSeek 模型二次组织解题，答案流式回写聊天框。**结合 Copilot 的对话组织优势与 DSH 的 agent 执行优势，让 DeepSeek 发挥最大性能。**
+2. **Copilot 桥接（v0.7.15 起）**：把 DSH 注册为 VS Code 聊天模型——模型选择器里出现 **DSH (DeepSeek Harness)**，选中它提问，Copilot 组织好的现成对话经「滤除杂音」后交给 DSH + DeepSeek 模型二次组织解题，答案流式回写聊天框。**结合 Copilot 的对话组织优势与 DSH 的 agent 执行优势，让 DeepSeek 发挥最大性能。**
 
 面板部分坚持「只做一个忠实的窗口」哲学：最大程度上客观、原样地呈现 DSH Web GUI，不注入脚本、不改写界面、不拦截交互，也不干涉你对 DSH 的插件开发、界面魔改等任何二次定制——DSH 的功能表达始终由你完全掌控。
 
 如果喜欢本扩展请转至 [Deepseek-Harness-for-VS-Code](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code) 星标助力；对 Chrome Extension 有需求也请关注 [Deepseek-Harness-for-Chrome](https://github.com/Vithrive/Deepseek-Harness-for-Chrome)。
 
-## ✨ 快速上手：Copilot 桥接（v0.7.13 · 初始版本）
+## ✨ 快速上手：Copilot 桥接（v0.7.15 · 初始版本）
 
 1. 安装本扩展（Marketplace 或 .vsix）→ Reload Window；
 2. 打开 Chat 面板（Ctrl+Alt+I）→ 模型选择器（Ctrl+Alt+.）里选择 **DSH (DeepSeek Harness)**；
@@ -19,7 +19,7 @@
 
 **路线图**：这是一个初始版本，后续将更新：① DSH 模型的多模型选项（如 dsh-pro / dsh-flash 多个条目）；② 推理强度（reasoningEffort）选择。
 
-> 详见下文「DSH 作为聊天模型（v0.7.13）」。备用入口：@dsh ChatParticipant（见「在 Copilot Chat 中使用 /dsh」）。
+> 详见下文「DSH 作为聊天模型（v0.7.15）」。备用入口：@dsh ChatParticipant（见「在 Copilot Chat 中使用 DSH」的备用方式）。
 
 ## 快速安装（下载 .vsix）
 
@@ -47,7 +47,7 @@
 
 ## 特性
 
-- **Copilot 桥接（v0.7.13）**：DSH 注册为 VS Code 聊天模型「DSH (DeepSeek Harness)」——在 Copilot Chat 模型选择器选中即可：吃 Copilot 组织好的现成对话、滤除杂音、交给 DSH 二次组织、流式回写（详见「快速上手：Copilot 桥接」）
+- **Copilot 桥接（v0.7.15）**：DSH 注册为 VS Code 聊天模型「DSH (DeepSeek Harness)」——在 Copilot Chat 模型选择器选中即可：吃 Copilot 组织好的现成对话、滤除杂音、交给 DSH 二次组织、流式回写（详见「快速上手：Copilot 桥接」）
 - 在 Activity Bar 中新增「DeepSeek Harness」图标，点击后打开内嵌面板
 - 支持把面板移动到**辅助侧边栏**（右键图标 → Move to Secondary Side Bar，或直接拖拽）
 - **标签页模式**：通过「DeepSeek Harness: 在标签页中打开」（面板标题栏按钮或命令面板）在编辑器区域以标签页打开 DSH，页面宽度最大化，标签页可右键 **Pin 住**；标签页打开时侧边栏自动让位显示占位、关闭标签页后自动恢复（v0.3.5）
@@ -62,7 +62,7 @@
 - **发送选中代码到 DSH**：选中代码后右键 → 「DeepSeek Harness: 发送选中内容到对话框」，自动插入到 DSH 对话框，支持精确光标定位（v0.2.12；v0.3.2 修复该功能不生效的问题，详见下方[使用示例](#使用示例发送选中内容到对话框)）
 - **对话链接外部打开**：点击 DSH 对话中的外部链接会在系统默认浏览器打开，不在 iframe 内导航（v0.2.13，配合 DSH 插件 `dsh-open-links`）
 - **自动安装 DSH 配套插件 `dsh-drop-caret`**（v0.3.0）：打开面板时自动检测并在 DSH 中安装配套插件，实现「把文件/文件夹/选中代码段插入 DSH 对话框」，用户只需安装本扩展
-- **/dsh ChatParticipant（v0.4.2 起）**：在 VS Code Copilot Chat 中输入 `@dsh 你的问题`，自动把本对话中此前通过 @dsh 的问答上下文注入 DSH，由 DSH + 你配置的模型在工作区分析数据、执行工具解题，并把答案增量**流式回写**到 Copilot 聊天框；新开聊天会自动创建新的 DSH 会话（详见下文「在 Copilot Chat 中使用 /dsh」）
+- **@dsh ChatParticipant（v0.4.2 起，备用）**：在 VS Code Copilot Chat 中输入 `@dsh 你的问题`，自动把本对话中此前通过 @dsh 的问答上下文注入 DSH，由 DSH + 你配置的模型在工作区分析数据、执行工具解题，并把答案增量**流式回写**到 Copilot 聊天框；新开聊天会自动创建新的 DSH 会话（详见下文「在 Copilot Chat 中使用 DSH」的备用方式）
 
 ## 为什么自动安装 DSH 插件 `dsh-drop-caret`？
 
@@ -95,47 +95,26 @@
 
 > 同样地，也可以把文件 / 文件夹从系统文件管理器或 VS Code 资源管理器**直接拖进**对话框，插入位置同样是拖放点对应的光标位置。
 
-## 在 Copilot Chat 中使用 /dsh（v0.4.0+）
+## 在 Copilot Chat 中使用 DSH（v0.7.15）
 
-在 VS Code **Copilot Chat** 中直接输入：
+### 推荐方式：把 DSH 作为聊天模型（见下一节）
 
-```
-/dsh 帮我分析这个项目的数据，并给出结论
-```
+模型选择器（Ctrl+Alt+.）里选择 **DSH (DeepSeek Harness)**，直接提问即可，无需任何前缀。
 
-> 提示：`/dsh` 与 `@dsh` 均可调用；部分第三方聊天 provider 不渲染 `/` 参与者列表，此时请用 `@dsh 问题`。
+### 备用方式：@dsh ChatParticipant（v0.4.x 起兼容保留；/dsh 斜杠命令已取消）
 
-扩展会自动：
-
-1. 确保 DSH 服务就绪（复用面板的检测/自动启动逻辑）；
-2. 为当前聊天创建（或复用）一个 DSH 会话：**新聊天自动新建 DSH 会话**，同一聊天内追问复用并携带此前 @dsh 的问答上下文（VS Code API 限制：参与者只能看到自己参与的消息，看不到其它模型的对话）；
-3. 提交任务后轮询 DSH 的事件流，把答案**增量流式回写**到 Copilot 聊天框；执行进度（第几轮/第几步）以进度提示展示；
-4. 完成/超时/出错都会给出明确提示；DSH 面板中可看到完整执行过程。
+在聊天框输入 @dsh 你的问题。受 VS Code 参与者 API 限制（参与者只能看到自己参与的消息），此路径需要通过磁盘直读同步「切到其它模型后产生的中间对话」，功能弱于聊天模型方式；建议仅在聊天模型方式不可用时使用。详见「备用：@dsh 参与者与中间对话同步」。
 
 ### 模型选择（如何让 DSH 用 DeepSeek v4 pro）
 
-默认使用 **DSH 设置里的默认模型**（`agent-default-model`）。要固定为某个模型：
+默认使用 **DSH 设置里的默认模型**（agent-default-model）。要固定为某个模型：
 
-1. 先在 DSH 设置（或 `~/.dsh/settings.yaml`）里配置好对应 provider，例如 DeepSeek 官方 API：
-
-   ```yaml
-   llm-pi-ai:
-     providers:
-       deepseek:
-         displayName: DeepSeek
-         apiKeyEnv: DEEPSEEK_API_KEY
-         api: openai-completions
-         baseURL: https://api.deepseek.com/v1
-         models:
-           - id: deepseek-v4-pro
-             name: DeepSeek v4 Pro
-   ```
-
-2. 在 VS Code 设置里指定（provider id 与模型 id 按你实际的配置填写）：
+1. 在 DSH 设置里配置好 provider——DSH 内置 deepseek 适配器（路由 id 为 deepseek-official，模型含 deepseek-v4-pro / deepseek-v4-flash / deepseek-v4-flash-vision-exp）；用其它 provider 时按实际路由 id 填写。
+2. 在 VS Code 设置里指定：
 
    ```json
    {
-     "dshPanel.chatProvider": "deepseek",
+     "dshPanel.chatProvider": "deepseek-official",
      "dshPanel.chatModel": "deepseek-v4-pro"
    }
    ```
@@ -146,73 +125,44 @@
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
-| `dshPanel.chatAgentPreset` | 空 | `/dsh` 创建 DSH 会话时使用的 agent 预设（如 `liangshen`）；留空=DSH 默认 |
-| `dshPanel.chatProvider` | 空 | 指定模型提供方（provider id）；留空=DSH 默认模型 |
-| `dshPanel.chatModel` | 空 | 指定模型 id；与 `chatProvider` 配合 |
-| `dshPanel.chatTimeoutMs` | 900000 | 单次 `/dsh` 任务最长等待毫秒数（15 分钟），超时后任务仍在 DSH 面板运行 |
+| dshPanel.chatAgentPreset | 空 | 创建 DSH 会话时使用的 agent 预设（如 liangshen）；留空=DSH 默认 |
+| dshPanel.chatProvider | 空 | 指定模型提供方（provider id，如 deepseek-official）；留空=DSH 默认模型 |
+| dshPanel.chatModel | 空 | 指定模型 id（如 deepseek-v4-pro）；与 chatProvider 配合 |
+| dshPanel.chatTimeoutMs | 900000 | 单次任务最长等待毫秒数（15 分钟），超时后任务仍在 DSH 面板运行 |
+| dshPanel.enableDshModel | true | 是否把 DSH 注册为聊天模型（模型选择器显示 DSH (DeepSeek Harness)） |
+| dshPanel.debugModelMessages | false | 调试：把 VS Code 发给 DSH 的消息写入工作区 .dsh-debug/ 目录 |
 
 ### 其它
 
-- **重置映射**：命令面板执行「DeepSeek Harness: 重置 /dsh 会话映射」，下次 `/dsh` 会创建全新 DSH 会话并重新携带 Copilot 历史。
-- **诊断**：命令面板执行「DeepSeek Harness: 检查 /dsh 状态」，可查看 chat API 是否可用、参与者是否注册、DSH 是否可达、当前模型配置。
-- **Copilot 消息代理（v0.5.0）**：扩展自带零依赖本地代理 `proxy/dsh-copilot-proxy.js`，截获 Copilot 发往自定义模型的完整消息列表，让 `/dsh` 能同步「上次 @dsh 之后切换到其它模型产生的中间对话」，实现 Copilot ↔ DSH 共享同一份消息列表（详见下文「共享消息列表（本地代理）」）。
+- **重置映射**：命令面板执行「DeepSeek Harness: 重置 DSH 会话映射」，下次提问将创建新的 DSH 会话。
+- **诊断**：命令面板执行「DeepSeek Harness: 检查 DSH 状态」，可查看 chat API、参与者注册、DSH 服务、模型配置与代理状态。
 - **取消**：停止等待不会杀掉 DSH 任务，任务会继续在 DSH 中运行，可到面板查看。
-- **前置条件**：VS Code ≥ 1.94（自定义 Chat Agent 需 1.100+）、已安装 GitHub Copilot Chat；DSH 侧需要支持 RPC 端点 `session.create` / `session.selectModel` / `session.prompt` / `session.history`（实测 v0.1.0-rc.8 可用）。
+- **前置条件**：VS Code ≥ 1.94；DSH 侧需支持 RPC 端点 session.create / session.selectModel / session.prompt / session.history（实测 v0.1.0-rc.8 可用）。
 
 
-## DSH 作为聊天模型（v0.7.13）
+## DSH 作为聊天模型（v0.7.15，推荐）
 
 扩展把 DSH 注册为 VS Code 语言模型提供方（与 DeepSeek V4 等自定义模型同一机制）：模型选择器中会出现 **DSH (DeepSeek Harness)**。
 
-- 选中它直接提问：VS Code 把组织好的完整对话（含它负责的 compact）交给扩展 → 过滤杂音（系统提示词/工具定义/环境信息）→ 交给 DSH（使用 `dshPanel.chatProvider`/`dshPanel.chatModel` 指定的模型，如 deepseek-official/deepseek-v4-pro）执行 → 流式回写聊天框。
-- **无需磁盘扫描、无需代理、无需改任何配置**，卸载扩展零残留（模型随扩展消失）。
+- 选中它直接提问：VS Code 把组织好的完整对话（含它负责的 compact）交给扩展 → 过滤杂音 → 交给 DSH（使用 dshPanel.chatProvider / dshPanel.chatModel 指定的模型）执行 → 流式回写聊天框。
+- **设计原则**：吃 Copilot 组织好的现成对话、只滤杂音（系统提示词 / 工具定义 / 环境上下文 / 记忆包装全部丢弃；Copilot 记忆正文保留传递）、交给 DSH 二次组织。
+- **同一聊天对应同一 DSH 会话**（续聊只发增量）；卸载扩展零残留（模型随扩展消失）。
 - 每次请求由 VS Code 自带全量上下文并负责 compact；DSH 用自己的工具（模型声明不支持 VS Code 工具，避免双 harness 冲突）。
-- 与 `@dsh` 参与者、磁盘直读并存，互不影响；`dshPanel.enableDshModel=false` 可关闭。
+- VS Code 的 UI 辅助合成请求（进度文案 / 标题生成）由扩展本地处理，不会转发给 DSH。
+- **路线图**：后续将增加 DSH 模型的多模型选项（如 dsh-pro / dsh-flash 多个条目）与推理强度（reasoningEffort）选择。
 
-## 共享消息列表（本地代理，v0.5.0）
+## 备用：@dsh 参与者与中间对话同步（v0.4.x 起，可选）
 
-VS Code Chat API 只给参与者看自己的消息，@dsh 看不到你切到自定义模型后产生的对话。本扩展内置一个零依赖本地代理，让两边拿到同一份消息列表：
+@dsh 参与者路径受 API 限制看不到其它模型的消息，因此需要额外同步「切到自定义模型后产生的中间对话」，有两种来源（dshPanel.chatSyncSource）：
 
-```
-VS Code Chat ──messages──▶ 本地代理(3050) ──转发──▶ api.deepseek.com
-                              │
-                              ├─ 记录完整 messages（/__dsh/recent 可读）
-                              └─ 上游响应原样透传（含 SSE 流式）
-```
+- **磁盘直读（默认，零侵入）**：直接解析 VS Code 私有的 chatSessions/*.jsonl 会话文件（含空窗口），不需要改任何模型配置，卸载扩展零残留。用会话文件的 sessionId 标签精确映射 DSH 会话（新聊天必新建、同一聊天必复用），首次 @dsh 全量补课（取整个对话窗口的自定义模型问答），后续只增量同步中间对话。
+- **代理截获（可选）**：把模型 url 指向扩展自带的本地代理（proxy/dsh-copilot-proxy.js）截获 messages。侵入式（卸载扩展前必须回退 url），仅当磁盘直读不可用时使用。
 
-### 两种同步来源（v0.6.0 起默认磁盘直读）
+相关配置：dshPanel.chatSyncSource（disk/proxy）、dshPanel.chatSyncLookbackMin（默认 60 分钟扫描窗口）、dshPanel.chatSyncInterim（是否同步）、dshPanel.chatSyncMaxChars（默认 500000，软上限）、dshPanel.chatProxyUrl / dshPanel.chatProxyUpstream / dshPanel.chatProxyAutoStart（代理相关）。
 
-**磁盘直读（默认，零侵入）**：直接解析 VS Code 私有的 `chatSessions/*.jsonl` 会话文件（含空窗口），**不需要改任何模型配置**，卸载扩展零残留。用会话文件的 `sessionId` 标签精确映射 DSH 会话（新聊天必新建、同一聊天必复用），首次 `@dsh` 全量补课（取整个对话窗口的自定义模型问答），后续只增量同步中间对话。
+**内容清洗**：只传输有效对话——自动跳过 VS Code 系统提示词（instructions / skills / description）、环境信息块（environment_info 等）、context / reminderInstructions 注入块、工具输出与标题生成请求；用户提问只保留 userRequest 内的真实内容。
 
-**代理截获（可选，`dshPanel.chatSyncSource=proxy`）**：把模型 url 指向本地代理截获 messages。侵入式（卸载扩展前必须回退 url），仅当磁盘直读不可用时使用。
-
-相关配置：`dshPanel.chatSyncSource`（disk/proxy）、`dshPanel.chatSyncLookbackMin`（默认 60 分钟扫描窗口）、`dshPanel.chatSyncInterim`、`dshPanel.chatSyncMaxChars`（默认 500000，软上限）。
-
-之后：
-
-- **Copilot → DSH**：@dsh 每次调用会从代理读取对话并注入 DSH 上下文：
-  - **首次 @dsh**：一次性全量补课——取该对话窗口的完整消息列表（Copilot 每次全量重发，最新一条记录即整个对话），超 `dshPanel.chatSyncMaxChars` 时先压缩但绝不截断；
-  - **后续 @dsh**：只增量同步「上次 @dsh 之后产生的中间对话」（按上次提问定位）。
-  - **内容清洗**：只传输有效对话——自动跳过 VS Code 系统提示词（`<instructions>/<skills>/<description>`）、环境信息块（`<environment_info>` 等）、`<context>/<reminderInstructions>` 注入块、工具输出与标题生成请求；用户提问只保留 `<userRequest>` 内的真实内容。
-- **DSH → Copilot**：@dsh 的回答本来就在聊天记录里，切回自定义模型时 VS Code 会整段发给模型（天然共享）。
-- 代理由扩展自动启动/复用；命令面板「DeepSeek Harness: 停止 Copilot 消息代理」可手动停止。
-
-### 相关配置
-
-| 配置项 | 默认值 | 说明 |
-|---|---|---|
-| `dshPanel.chatProxyUrl` | http://127.0.0.1:3050 | 代理地址 |
-| `dshPanel.chatProxyUpstream` | https://api.deepseek.com | 代理默认转发的上游（多模型按 `proxy/routes.json` 的模型→上游表路由） |
-| `dshPanel.chatProxyAutoStart` | true | 未运行时自动启动 |
-| `dshPanel.chatSyncInterim` | true | 是否同步中间对话 |
-| `dshPanel.chatSyncMaxChars` | 500000 | 单次同步最大字符数（软上限：超限先压缩、不截断） |
-
-### 注意事项
-
-- **代理不可用时，Copilot 中指向代理的 DeepSeek 模型会不可用**；想完全回退，把 `chatLanguageModels.json` 的 url 改回原地址即可（备份文件）。
-- 若 VS Code 拒绝 `http://` 自定义端点：代理支持 HTTPS（自带自签名证书，需先信任），把 url 改为 `https://127.0.0.1:3051/v1` 并把 `dshPanel.chatProxyUrl` 相应改为 `https://127.0.0.1:3051`，同时给扩展的代理启动加 `--https-port 3051`（可联系作者或自行配置 `dshPanel.dshCommand` 旁路脚本）。
-- 中间对话同步是 best-effort：定位不到当前聊天时宁缺毋滥，不会注入错误上下文。
-
+注意：代理不可用时，指向代理的模型会不可用（回退方法：把模型 url 改回原地址）；中间对话同步是 best-effort，定位不到当前聊天时宁缺毋滥，不会注入错误上下文。
 
 ## 从源码安装（开发模式，零依赖，无需编译）
 

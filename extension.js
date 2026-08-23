@@ -1516,7 +1516,7 @@ async function dshChatHandler(request, chatContext, stream, token) {
 
     await gContext.globalState.update(CHAT_MAP_KEY, map);
   } catch (e) {
-    stream.markdown('❌ /dsh 执行出错：' + (e && e.message ? e.message : String(e)));
+    stream.markdown('❌ @dsh 执行出错：' + (e && e.message ? e.message : String(e)));
   }
 }
 
@@ -2277,9 +2277,9 @@ async function showChatStatus() {
   const provider = cfg().get('dshPanel.chatProvider', '');
   const model = cfg().get('dshPanel.chatModel', '');
   const lines = [
-    'DeepSeek Harness /dsh 状态',
+    'DeepSeek Harness DSH 状态',
     'chat API 可用: ' + (hasChat ? '是' : '否'),
-    '/dsh 参与者已注册: ' + (chatParticipantRegistered ? '是' : '否'),
+    '@dsh 参与者已注册: ' + (chatParticipantRegistered ? '是' : '否'),
     'DSH 服务可达: ' + (reachable ? '是 (' + getUrl() + ')' : '否'),
     '模型配置: provider=' + (provider || '(跟随 DSH 默认)') + ' / model=' + (model || '(跟随 DSH 默认)'),
     '已映射聊天数: ' + Object.keys(gContext.globalState.get(CHAT_MAP_KEY) || {}).length,
@@ -2289,7 +2289,7 @@ async function showChatStatus() {
   ];
   if (!hasChat) {
     lines.push('');
-    lines.push('提示: 当前环境没有可用的 Chat API，/dsh 无法注册。');
+    lines.push('提示: 当前环境没有可用的 Chat API，@dsh 无法注册。');
     lines.push('请确认安装了官方 GitHub Copilot Chat，或使用 VS Code 内置 Chat 视图的兼容 provider。');
   } else if (!chatParticipantRegistered) {
     lines.push('');
@@ -2532,7 +2532,7 @@ function activate(context) {
       await gContext.globalState.update(CHAT_MAP_KEY, {});
       await gContext.globalState.update(DSH_MODEL_MAP_KEY, {});
     }
-    vscode.window.showInformationMessage('已重置 /dsh 与 DSH 模型的会话映射：下次提问将创建新的 DSH 会话。');
+    vscode.window.showInformationMessage('已重置 DSH 会话映射：下次提问将创建新的 DSH 会话。');
   });
 
   context.subscriptions.push(viewSub, openInTabCmd, refreshCmd, openBrowserCmd, restartCmd, wsSub, sendSelectionCmd, chatStatusCmd, stopProxyCmd, resetChatCmd);

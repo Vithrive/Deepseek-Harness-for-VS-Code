@@ -2,7 +2,7 @@
   "name": "deepseek-harness-vscode",
   "displayName": "DeepSeek Harness for VSCode",
   "description": "DeepSeek Harness (DSH) 的 VS Code 接入：侧边栏/标签页忠实呈现 DSH Web GUI 并自动检测启动；v0.7.13 起把 DSH 注册为 Copilot 聊天模型「DSH (DeepSeek Harness)」——吃 Copilot 组织好的现成对话、滤除杂音、交给 DSH 二次组织、流式回写，让 DeepSeek 发挥最大性能",
-  "version": "0.7.14",
+  "version": "0.7.15",
   "publisher": "vithrive",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -80,27 +80,27 @@
         "dshPanel.chatAgentPreset": {
           "type": "string",
           "default": "",
-          "description": "/dsh ChatParticipant 创建 DSH 会话时使用的 agent 预设（如 liangshen）；留空=DSH 设置里的默认预设"
+          "description": "@dsh ChatParticipant 创建 DSH 会话时使用的 agent 预设（如 liangshen）；留空=DSH 设置里的默认预设"
         },
         "dshPanel.chatProvider": {
           "type": "string",
           "default": "",
-          "description": "/dsh ChatParticipant 使用的模型提供方（provider id，需已在 DSH 设置中配置）；留空=跟随 DSH 默认模型"
+          "description": "@dsh ChatParticipant 使用的模型提供方（provider id，需已在 DSH 设置中配置）；留空=跟随 DSH 默认模型"
         },
         "dshPanel.chatModel": {
           "type": "string",
           "default": "",
-          "description": "/dsh ChatParticipant 使用的模型 id（与 chatProvider 配合，如 deepseek-v4-pro）；留空=跟随 DSH 默认模型"
+          "description": "@dsh ChatParticipant 使用的模型 id（与 chatProvider 配合，如 deepseek-v4-pro）；留空=跟随 DSH 默认模型"
         },
         "dshPanel.chatTimeoutMs": {
           "type": "number",
           "default": 900000,
-          "description": "/dsh 单次任务最长等待时间（毫秒），超时后任务仍在 DSH 面板运行"
+          "description": "单次任务最长等待时间（毫秒），超时后任务仍在 DSH 面板运行"
         },
         "dshPanel.chatProxyUrl": {
           "type": "string",
           "default": "http://127.0.0.1:3050",
-          "description": "Copilot 消息截获代理的地址（用于让 /dsh 读取 Copilot 发往自定义模型的完整消息列表）"
+          "description": "Copilot 消息截获代理的地址（用于让 @dsh 读取 Copilot 发往自定义模型的完整消息列表）"
         },
         "dshPanel.chatProxyUpstream": {
           "type": "string",
@@ -136,7 +136,7 @@
         "dshPanel.chatSyncInterim": {
           "type": "boolean",
           "default": true,
-          "description": "/dsh 是否自动同步 Copilot 侧中间对话（上次 @dsh 之后切换到其它模型产生的问答）"
+          "description": "@dsh 是否自动同步 Copilot 侧中间对话（上次 @dsh 之后切换到其它模型产生的问答）"
         },
         "dshPanel.chatSyncMaxChars": {
           "type": "number",
@@ -199,11 +199,11 @@
       },
       {
         "command": "dshPanel.resetChatMapping",
-        "title": "DeepSeek Harness: 重置 /dsh 会话映射"
+        "title": "DeepSeek Harness: 重置 DSH 会话映射"
       },
       {
         "command": "dshPanel.chatStatus",
-        "title": "DeepSeek Harness: 检查 /dsh 状态"
+        "title": "DeepSeek Harness: 检查 DSH 状态"
       },
       {
         "command": "dshPanel.stopProxy",
