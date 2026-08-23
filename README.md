@@ -1,13 +1,52 @@
-# DeepSeek Harness for VS Code
+<div align="center">
+  <h1 align="center">
+    <img src="media/icon.svg" width="128" alt="icon"/>
+    <br/>
+    DeepSeek Harness for VS Code
+  </h1> 
+  
+  <p>
+    一个零依赖的 VS Code 扩展，把 <strong>DeepSeek Harness (DSH)</strong> 接入 VS Code 的两种形态
+  </p>
 
-一个零依赖的 VS Code 扩展，把 **DeepSeek Harness (DSH)** 接入 VS Code 的两种形态：
+<!-- Badges -->
 
-1. **忠实窗口**：把 DSH 的 Web GUI 原样内嵌到 VS Code 侧边栏 / 辅助侧边栏 / 编辑器标签页，自动检测、启动 DSH 服务——不注入脚本、不改写界面、不拦截交互，不影响你对 DSH 的页面组织、第三方插件装配等任何二次开发行为；
-2. **Copilot 桥接（v0.7.13 起，早期版本）**：把 DSH 注册为 VS Code 聊天模型——模型选择器里出现 **DSH (DeepSeek Harness)、DeepSeek-V4-Pro (DSH)、DeepSeek-V4-Flash (DSH)、deepseek-v4-flash-vision-exp (DSH)** 等条目，选中即可在 Copilot Chat 里借助 DSH 强大的任务编排与工具调用能力解题。
+![Platform](https://img.shields.io/badge/Platform-VSCode-blue?style=for-the-badge)
+![GitHub Release](https://img.shields.io/github/v/release/Vithrive/Deepseek-Harness-for-VS-Code?style=for-the-badge)
+![GitHub Repo stars](https://img.shields.io/github/stars/Vithrive/Deepseek-Harness-for-VS-Code?style=for-the-badge)
+![GitHub Last Commit](https://img.shields.io/github/last-commit/Vithrive/Deepseek-Harness-for-VS-Code?style=for-the-badge)
+[![Total Download](https://img.shields.io/github/downloads/Vithrive/Deepseek-Harness-for-VS-Code/total?style=for-the-badge)](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases)
 
-> **Copilot 桥接不影响「忠实窗口」形态**——它只是为便捷编程而做的功能提升；你不选这些模型条目时，一切与没有桥接功能时完全一样。
+[简体中文](README.md) | [English](README_en.md)
 
-如果喜欢本扩展请转至 [Deepseek-Harness-for-VS-Code](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code) 星标助力；对 Chrome Extension 有需求也请关注 [Deepseek-Harness-for-Chrome](https://github.com/Vithrive/Deepseek-Harness-for-Chrome)。
+</div>
+
+---
+
+<div align="center">
+
+⭐ 如果喜欢本扩展，请转至 [Deepseek-Harness-for-VS-Code](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code) 星标助力 ⭐<br>对 Chrome Extension 有需求也请关注 [Deepseek-Harness-for-Chrome](https://github.com/Vithrive/Deepseek-Harness-for-Chrome)
+
+</div>
+
+## ✨ 两种形态
+
+1. **🪟 忠实窗口**：把 DSH 的 Web GUI 原样内嵌到 VS Code 侧边栏 / 辅助侧边栏 / 编辑器标签页，自动检测、启动 DSH 服务——不注入脚本、不改写界面、不拦截交互，不影响你对 DSH 的页面组织、第三方插件装配等任何二次开发行为；
+2. **🧭 Copilot 桥接**（v0.7.13 起，早期版本）：把 DSH 注册为 VS Code 聊天模型——模型选择器里出现 **DSH (DeepSeek Harness)、DeepSeek-V4-Pro (DSH)、DeepSeek-V4-Flash (DSH)、deepseek-v4-flash-vision-exp (DSH)** 等条目，选中即可在 Copilot Chat 里借助 DSH 强大的任务编排与工具调用能力解题。
+
+> 💡 **Copilot 桥接不影响「忠实窗口」形态**——它只是为便捷编程而做的功能提升；你不选这些模型条目时，一切与没有桥接功能时完全一样。
+
+---
+
+## 📚 目录
+
+- [🚀 快速安装](#快速安装)
+- [🪟 忠实窗口（面板）](#忠实窗口面板)
+- [🧭 Copilot 桥接：操作指南](#copilot-桥接操作指南)
+- [🧩 Copilot 桥接：实现原理](#copilot-桥接实现原理)
+- [🌱 版本状态声明](#版本状态声明)
+- [🔧 从源码安装（开发模式）](#从源码安装开发模式)
+- [⚠️ 前置条件与已知限制](#前置条件与已知限制)
 
 ---
 
@@ -15,12 +54,10 @@
 
 - **Marketplace**：在 VS Code 扩展市场搜索 **DeepSeek Harness for VSCode** 一键安装（[Marketplace 页面](https://marketplace.visualstudio.com/items?itemName=vithrive.deepseek-harness-vscode)）。
 - **.vsix**：从 [GitHub Releases](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/releases/latest) 下载 `deepseek-harness-vscode-<版本>.vsix`，然后：
-
   ```bash
   code --install-extension deepseek-harness-vscode-<版本>.vsix
   ```
-
-  或在 VS Code 中：`Ctrl+Shift+P` → `Extensions: Install from VSIX...`。
+  或在 VS Code 中：`Ctrl+Shift+P` → `Extensions: Install from VSIX...`
 
 安装后 `Ctrl+Shift+P` → `Reload Window`。打开面板时扩展会自动检测并启动 DSH（未安装会提示并代为执行 `npm install -g @deepseek-ai/dsh`）。
 
@@ -48,7 +85,7 @@
    ![发送结果出现在 DSH 对话框中](media/send-selection-result.png)
 4. 在 DSH 里直接发送消息即可，模型可通过引用精确定位到代码块所在文件与行号。
 
-> 同样地，也可以把文件 / 文件夹从系统文件管理器或 VS Code 资源管理器**直接拖进**对话框，插入位置同样是拖放点对应的光标位置。
+> 💡 同样地，也可以把文件 / 文件夹从系统文件管理器或 VS Code 资源管理器**直接拖进**对话框，插入位置同样是拖放点对应的光标位置。
 
 ### 面板相关配置
 
@@ -99,7 +136,7 @@ Copilot 会话中途切到其他自定义模型问答、再切回 DSH 模型时�
 | `DeepSeek Harness: 检查 DSH 状态` | 查看 DSH 是否可达、模型提供方是否注册、当前模型配置 |
 | `DeepSeek Harness: 诊断 DSH 模型注册表` | 导出模型注册表诊断数据（排查用） |
 
-> 取消等待不会杀掉 DSH 任务：任务会继续在 DSH 中运行，可到面板查看。
+> 💡 取消等待不会杀掉 DSH 任务：任务会继续在 DSH 中运行，可到面板查看。
 
 ### 桥接相关配置
 
@@ -177,7 +214,7 @@ npx --yes @vscode/vsce package --allow-missing-repository
 code --install-extension deepseek-harness-vscode-<版本>.vsix
 ```
 
-## 前置条件与已知限制
+## ⚠️ 前置条件与已知限制
 
-- **前置条件**：已安装 DeepSeek Harness（`npm install -g @deepseek-ai/dsh` 全局安装或 `npx @deepseek-ai/dsh` 均可，扩展自动识别两种方式，也可用 `dshPanel.dshCommand` 指定完整路径）；DSH 默认响应头未设置 `X-Frame-Options` / 严格 CSP，可被 iframe 正常内嵌。
-- **已知限制**：DSH 前端在 VS Code webview 多实例下退化为单例（普通浏览器多开正常，属 DSH 前端实现层面问题），因此标签页与侧边栏暂不能同时加载 DSH；扩展以「单活动视图」策略规避（打开标签页时侧边栏自动让位显示占位，关闭后自动恢复）。
+- **前置条件**：已安装 DeepSeek Harness（`npm install -g @deepseek-ai/dsh` 全局安装或 `npx @deepseek-ai/dsh` 均可，扩展自动识别两种方式，也可用 `dshPanel.dshCommand` 指定完整路径）；DSH 默认响应头未设置 `X-Frame-Options` / 严格 CSP，可被 iframe 正常内嵌
+- **已知限制**：DSH 前端在 VS Code webview 多实例下退化为单例（普通浏览器多开正常，属 DSH 前端实现层面问题），因此标签页与侧边栏暂不能同时加载 DSH；扩展以「单活动视图」策略规避（打开标签页时侧边栏自动让位显示占位，关闭后自动恢复）
