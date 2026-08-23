@@ -19,16 +19,13 @@ let ensurePromise = null;
 // 解析出的 dsh 启动方式：{ cmd, prefix }。null 表示尚未解析或都不可用。
 // 优先全局安装（dsh 命令），其次 npx 缓存安装（npx 安装不会写入全局 PATH）。
 let dshInvocation = null;
+let dshInvocationAt = 0;
 // 编辑器标签页模式：当前打开的 DSH 标签页 panel（未打开时为 null）。
 let activeTab = null;
-// /dsh ChatParticipant 需要访问扩展上下文（globalState 持久化会话映射）。
+// 扩展上下文（globalState 持久化会话映射）。
 let gContext = null;
-// /dsh ChatParticipant 是否注册成功（供「检查 /dsh 状态」命令查询）。
-let chatParticipantRegistered = false;
 // dsh 语言模型提供方（模型选择器里的 DSH (DeepSeek Harness)）是否注册成功。
 let dshModelProviderRegistered = false;
-// 本地 Copilot 消息截获代理（由扩展启动/复用的子进程）。
-let proxyChild = null;
 
 /**
  * 读取配置。
@@ -128,9 +125,15 @@ function installDsh() {
  * @returns {Promise<boolean>} 最终是否已安装可用。
  */
 async function ensureDshInstalled() {
+  // 已解析成功过的启动方式直接复用（15 分钟内）：避免每次提问都起子进程探测
+  // dsh/npx（并发聊天时重复探测会拖慢扩展宿主、造成后一个聊天卡顿）。
+  if (dshInvocation && (Date.now() - dshInvocationAt) < 15 * 60 * 1000) {
+    return true;
+  }
   const inv = await resolveDshInvocation();
   if (inv) {
     dshInvocation = inv;
+    dshInvocationAt = Date.now();
     return true;
   }
 
@@ -167,6 +170,7 @@ async function ensureDshInstalled() {
   const after = await resolveDshInvocation();
   if (after) {
     dshInvocation = after;
+    dshInvocationAt = Date.now();
     return true;
   }
   return false;
@@ -273,127 +277,6 @@ function httpPostJson(url, payload, timeoutMs = 5000) {
 }
 
 /**
- * GET JSON（用于读取本地代理的内部接口）。
- * @param {string} url
- * @param {number} timeoutMs
- * @returns {Promise<any>}
- */
-function httpGetJson(url, timeoutMs = 5000) {
-  return new Promise((resolve, reject) => {
-    let target;
-    try {
-      target = new URL(url);
-    } catch (e) {
-      reject(e);
-      return;
-    }
-    const lib = target.protocol === 'https:' ? https : http;
-    const req = lib.get({
-      hostname: target.hostname,
-      port: target.port || (target.protocol === 'https:' ? 443 : 80),
-      path: target.pathname + target.search,
-      method: 'GET',
-      headers: { Accept: 'application/json' }
-    }, (res) => {
-      let body = '';
-      res.on('data', (c) => { body += c; });
-      res.on('end', () => {
-        try {
-          resolve(JSON.parse(body));
-        } catch {
-          resolve({ raw: body });
-        }
-      });
-    });
-    req.on('error', reject);
-    req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout')));
-  });
-}
-
-// =====================================================================
-// Copilot 消息截获代理：让 @dsh 拿到 Copilot 侧发往自定义模型的完整消息列表
-// =====================================================================
-const CHAT_PROXY_DEFAULT_PORT = 3050;
-
-function getProxyUrl() {
-  return String(cfg().get('dshPanel.chatProxyUrl', 'http://127.0.0.1:' + CHAT_PROXY_DEFAULT_PORT)).replace(/\/+$/, '');
-}
-
-function getProxyUpstream() {
-  return String(cfg().get('dshPanel.chatProxyUpstream', 'https://api.deepseek.com')).replace(/\/+$/, '');
-}
-
-/**
- * 确保本地代理在运行：健康检查 → 未运行则自动启动扩展自带的 dsh-copilot-proxy.js。
- * @returns {Promise<boolean>}
- */
-async function ensureProxyRunning() {
-  const url = getProxyUrl();
-  if (await checkUrl(url + '/__dsh/health')) {
-    return true;
-  }
-  if (!cfg().get('dshPanel.chatProxyAutoStart', true)) {
-    return false;
-  }
-  if (!proxyChild) {
-    const script = path.join(gContext.extensionUri.fsPath, 'proxy', 'dsh-copilot-proxy.js');
-    let port = String(CHAT_PROXY_DEFAULT_PORT);
-    try {
-      port = new URL(url).port || String(CHAT_PROXY_DEFAULT_PORT);
-    } catch (_) { /* 用默认端口 */ }
-    proxyChild = spawn('node', [script, '--port', port, '--upstream', getProxyUpstream()], {
-      cwd: getWorkspaceDir(),
-      windowsHide: true,
-      stdio: 'ignore'
-    });
-    proxyChild.on('error', () => { proxyChild = null; });
-    proxyChild.on('exit', () => { proxyChild = null; });
-  }
-  for (let i = 0; i < 20; i++) {
-    await sleep(300);
-    if (await checkUrl(url + '/__dsh/health')) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * 读取代理截获的最近请求（messages 列表）。
- * @returns {Promise<any[]>}
- */
-async function proxyRecentItems() {
-  const url = getProxyUrl() + '/__dsh/recent?limit=30';
-  const data = await httpGetJson(url, 8000);
-  return (data && Array.isArray(data.items)) ? data.items : [];
-}
-
-/**
- * 取本参与者（@dsh）上一次回答的文本，用于在代理记录中定位当前聊天。
- * @param {any} chatContext
- * @returns {string}
- */
-function lastParticipantResponseText(chatContext) {
-  const hist = (chatContext && Array.isArray(chatContext.history)) ? chatContext.history : [];
-  for (let i = hist.length - 1; i >= 0; i--) {
-    const t = hist[i];
-    if (!t || t.prompt !== undefined) continue; // ChatRequestTurn
-    const resp = t.response;
-    let text = '';
-    if (Array.isArray(resp)) {
-      text = resp
-        .map((p) => (p && (typeof p.value === 'string' ? p.value : (typeof p.text === 'string' ? p.text : ''))) || '')
-        .filter(Boolean)
-        .join('\n');
-    } else if (typeof resp === 'string') {
-      text = resp;
-    }
-    if (text) return text;
-  }
-  return '';
-}
-
-/**
  * 判断是否为 VS Code 注入的"非对话"内容块（系统提示词/环境信息/上下文提醒等）。
  * @param {string} t
  * @returns {boolean}
@@ -412,122 +295,27 @@ function isJunkUserText(t) {
  * @returns {string|null}
  */
 function extractUserRequest(t) {
-  const m = t.match(/<userRequest>\s*([\s\S]*?)\s*<\/userRequest>/);
+  let m = t.match(/<userRequest>\s*([\s\S]*?)\s*<\/userRequest>/);
+  if (m) return m[1].trim();
+  // VS Code 也会把真实提问包在 <prompt>…</prompt> 里（前面常跟 instructions/上下文块）
+  m = t.match(/<prompt>\s*([\s\S]*?)\s*<\/prompt>/);
   return m ? m[1].trim() : null;
 }
 
 /**
- * 清洗单条代理消息：跳过 system/tool 与 VS Code 注入块，
- * 用户消息只保留 <userRequest> 内的真实提问。
- * @param {any} m
- * @returns {string} 有效对话文本（可能为空）。
- */
-function cleanProxyMessage(m) {
-  if (!m) return '';
-  if (m.role === 'system' || m.role === 'tool') return '';
-  const raw = m.text || '';
-  if (m.role === 'user') {
-    if (isJunkUserText(raw)) return '';
-    const inner = extractUserRequest(raw);
-    if (inner !== null) return inner;
-    return raw;
-  }
-  return raw;
-}
-
-/**
- * 把代理截获的消息列表序列化为纯对话文本（只保留有效对话内容）。
- * @param {any[]} msgs
+ * 剥离 VS Code 注入的 Copilot instructions 前置说明与 <instructions>…</instructions> 块。
+ * 这些是「上下文」不是用户提问；DSH 有自己的指令体系，不应作为对话内容回传。
+ * @param {string} t
  * @returns {string}
  */
-function serializeProxyMessages(msgs) {
-  const out = [];
-  for (const m of msgs) {
-    const text = cleanProxyMessage(m);
-    if (!text) continue;
-    if (m.role === 'user') out.push('用户：' + text);
-    else if (m.role === 'assistant') out.push('助手：' + text);
-    else out.push('[' + m.role + '] ' + text);
-  }
-  return out.join('\n\n');
-}
-
-/**
- * 超上限时做无损压缩（折叠空行/去行首尾空白）；宁全勿缺，不做截断。
- * @param {string} text
- * @param {number} max
- * @returns {string}
- */
-function compressChatText(text, max) {
-  if (text.length <= max) return text;
-  let out = text
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l, i, a) => !(l === '' && a[i - 1] === ''))
-    .join('\n');
-  if (out.length <= max) return out;
-  console.warn('[DeepSeek Harness] 中间对话压缩后仍超过上限（' + out.length + ' > ' + max + '），按完整消息发送');
-  return out;
-}
-
-/**
- * 从代理记录中提取「上次 @dsh 之后、Copilot 侧新增的对话」：
- * - 有 @dsh 历史：找包含我们上次回答片段的最近一条记录，取其后的消息（中间对话）；
- * - 首次 @dsh：取 10 分钟内最近一条记录的完整消息列表（best-effort）。
- * @param {any} chatContext
- * @returns {Promise<string>} 空串表示没有可同步的中间对话。
- */
-async function fetchInterimConversation(chatContext) {
-  const items = await proxyRecentItems();
-  if (!items.length) return '';
-  const hist = (chatContext && Array.isArray(chatContext.history)) ? chatContext.history : [];
-  const maxChars = Number(cfg().get('dshPanel.chatSyncMaxChars', 500000)) || 500000;
-
-  // 锚点候选（按可靠性排序）：最后一次 @dsh 用户提问 → 我们上次回答 → 本对话第一条 @dsh 提问。
-  // 原因：用户消息必然出现在 Copilot 发给自定义模型的上下文里；
-  // 助手消息是否包含参与者回答取决于 VS Code 的组装策略，故只作备选。
-  const anchors = [];
-  for (let i = hist.length - 1; i >= 0; i--) {
-    const t = hist[i];
-    if (t && typeof t.prompt === 'string' && t.prompt) {
-      anchors.push(t.prompt);
-      break;
-    }
-  }
-  const lastResp = lastParticipantResponseText(chatContext);
-  if (lastResp && !anchors.includes(lastResp)) anchors.push(lastResp);
-  if (hist.length > 0 && hist[0] && typeof hist[0].prompt === 'string' && hist[0].prompt && !anchors.includes(hist[0].prompt)) {
-    anchors.push(hist[0].prompt);
-  }
-
-  for (const anchor of anchors) {
-    const snippet = anchor.slice(0, 120).replace(/\s+/g, ' ');
-    if (!snippet) continue;
-    for (const it of items) {
-      const msgs = it.messages || [];
-      const joined = msgs.map((m) => (m && m.text ? m.text : '')).join('\n');
-      if (!joined.includes(snippet)) continue;
-      let idx = -1;
-      for (let i = 0; i < msgs.length; i++) {
-        const t = msgs[i] && msgs[i].text ? msgs[i].text : '';
-        if (t.includes(snippet)) { idx = i; break; }
-      }
-      if (idx < 0) continue;
-      // 取锚点消息之后的中间对话
-      return compressChatText(serializeProxyMessages(msgs.slice(idx + 1)), maxChars);
-    }
-  }
-
-  // 首次 @dsh（本参与者无历史）：取最近一条请求的完整消息列表作为一次性全量补课。
-  // 原理：Copilot 每次把整个对话重新发给模型，因此最新一条记录已包含该对话窗口的全部问答；
-  // 清洗后即"完整对话内容"。超上限时压缩但绝不截断。
-  if (hist.length === 0) {
-    const newest = items[0];
-    if (newest) {
-      return compressChatText(serializeProxyMessages(newest.messages || []), maxChars);
-    }
-  }
-  return '';
+function stripCopilotContext(t) {
+  let s = String(t || '');
+  // 去掉 <instructions>…</instructions>（含 .copilot/instructions 附件与 AGENTS.md 等引用）
+  s = s.replace(/<instructions>[\s\S]*?<\/instructions>/gi, '');
+  // 去掉 VS Code 的 instructions 前置说明句（中英文变体兜底）
+  s = s.replace(/when generating code, please follow these user provided coding instructions\.?/gi, '');
+  s = s.replace(/you can ignore an instruction if it contradicts a system message\.?/gi, '');
+  return s.trim();
 }
 
 /**
@@ -1202,12 +990,6 @@ async function render(view) {
   view.webview.html = r.html;
 }
 
-// =====================================================================
-// /dsh ChatParticipant —— 在 Copilot Chat 里提问，由 DSH 执行并流式回写
-// =====================================================================
-const CHAT_MAP_KEY = 'dsh.chatSessions';
-const CHAT_TIMEOUT_DEFAULT = 900000; // 15 分钟
-
 /**
  * 执行 DSH RPC（client-request 信封），成功返回 result.value，失败抛错。
  * @param {string} base
@@ -1233,293 +1015,6 @@ async function dshRpc(base, method, payload, timeoutMs) {
   throw new Error(msg);
 }
 
-/**
- * 把 Copilot 会话历史（ChatRequestTurn / ChatResponseTurn）序列化为文本。
- * @param {any[]} turns
- * @returns {string}
- */
-function serializeChatHistory(turns) {
-  const out = [];
-  for (const t of turns) {
-    if (!t) continue;
-    if (typeof t.prompt === 'string') {
-      out.push('用户：' + t.prompt);
-    } else {
-      let text = '';
-      const resp = t.response;
-      if (Array.isArray(resp)) {
-        text = resp
-          .map((p) => (p && (typeof p.value === 'string' ? p.value : (typeof p.text === 'string' ? p.text : ''))) || '')
-          .filter(Boolean)
-          .join('\n');
-      } else if (typeof resp === 'string') {
-        text = resp;
-      }
-      out.push(text ? '助手：' + text : '助手：（无文本）');
-    }
-  }
-  return out.join('\n\n');
-}
-
-/**
- * 提取当前请求里的文件引用（#file / @file 等），转成路径列表文本。
- * @param {any} request
- * @returns {string}
- */
-function serializeChatReferences(request) {
-  const refs = request && Array.isArray(request.references) ? request.references : [];
-  const paths = [];
-  for (const ref of refs) {
-    try {
-      const v = ref && ref.value;
-      if (v && typeof v === 'object' && typeof v.fsPath === 'string') {
-        paths.push(v.fsPath);
-      } else if (v && typeof v === 'object' && v.uri && typeof v.uri.fsPath === 'string') {
-        paths.push(v.uri.fsPath);
-      } else if (typeof v === 'string' && v.trim()) {
-        // 字符串引用只接受"真实路径"：Windows/Unix 绝对路径或 file:// URI 且单行、长度合理。
-        // 防止把 VS Code 注入的 <instructions>/<skills>/<agents> 等内容型引用当成文件发进 DSH。
-        const s = v.trim();
-        const isPath = /^[A-Za-z]:[\\/]/.test(s) || /^[\\/]/.test(s) || /^file:\/\//i.test(s);
-        const singleLine = s.indexOf('\n') < 0 && s.indexOf('\r') < 0;
-        if (isPath && singleLine && s.length < 1000) {
-          paths.push(s);
-        }
-      }
-    } catch (_) { /* 忽略无法序列化的引用 */ }
-  }
-  const unique = [...new Set(paths)];
-  return unique.length ? unique.map((p) => '- ' + p).join('\n') : '';
-}
-
-/**
- * 从 step/start 事件提取可展示的进度描述（尽力而为）。
- * @param {any} e
- * @returns {string}
- */
-function stepDescription(e) {
-  const d = e && e.data;
-  if (!d) return '';
-  const turn = typeof d.turn === 'number' ? d.turn : null;
-  const step = typeof d.step === 'number' ? d.step : null;
-  if (turn == null && step == null) return '';
-  return '第 ' + (turn != null ? turn : '?') + ' 轮 · 第 ' + (step != null ? step : '?') + ' 步';
-}
-
-/**
- * /dsh 主处理函数：把 Copilot 本会话历史 + 当前提问交给 DSH，
- * 轮询 DSH 会话事件流，把 text-delta 增量流式回写进 Copilot 聊天。
- * @param {any} request
- * @param {any} chatContext
- * @param {any} stream
- * @param {any} token
- * @returns {Promise<void>}
- */
-async function dshChatHandler(request, chatContext, stream, token) {
-  const base = getUrl().replace(/\/+$/, '');
-  const workspacePath = getWorkspaceDir();
-  try {
-    // 0. DSH 服务就绪（复用面板的安装/启动/等待逻辑）
-    stream.progress('正在确保 DeepSeek Harness 就绪…');
-    const installed = await ensureDshInstalled();
-    if (!installed) {
-      stream.markdown('❌ 未检测到 DeepSeek Harness (dsh)。请先安装 npm install -g @deepseek-ai/dsh，或打开 DSH 面板触发自动安装。');
-      return;
-    }
-    const running = await ensureRunningOnce();
-    if (!running) {
-      stream.markdown('❌ 无法连接 DSH 服务（' + getUrl() + '）。请打开 DSH 面板确认其已启动。');
-      return;
-    }
-
-    // 1. 定位当前 Copilot 聊天并建立 DSH 会话映射：
-    //    - 磁盘直读：会话文件 kind:0 的 sessionId 是 Copilot 新会话的唯一标签，
-    //      用 sessionId 作映射键 → 新聊天必新建 DSH 会话、同一聊天必复用；
-    //    - 定位失败时回退到「首条 @dsh 提问哈希」（可能碰撞，仅兜底）。
-    const source = cfg().get('dshPanel.chatSyncSource', 'disk');
-    const hist = (chatContext && Array.isArray(chatContext.history)) ? chatContext.history : [];
-    let currentChat = null;
-    if (source !== 'proxy') {
-      currentChat = locateCurrentChatFromDisk(chatContext, request);
-    }
-    let chatKey = null;
-    if (currentChat && currentChat.sessionId) {
-      chatKey = 'chat-' + String(currentChat.sessionId);
-    }
-    if (!chatKey) {
-      let seed = (request && request.prompt) || '';
-      if (hist.length > 0 && hist[0] && typeof hist[0].prompt === 'string' && hist[0].prompt) {
-        seed = hist[0].prompt;
-      }
-      chatKey = 'chat-' + crypto.createHash('sha1').update(seed).digest('hex').slice(0, 16);
-    }
-    const map = Object.assign({}, gContext.globalState.get(CHAT_MAP_KEY) || {});
-    let entry = map[chatKey];
-    if (!entry || !entry.dshSessionId || entry.workspacePath !== workspacePath) {
-      stream.progress('正在创建新的 DSH 会话…');
-      const createPayload = { cwd: workspacePath };
-      const preset = cfg().get('dshPanel.chatAgentPreset', '');
-      if (preset) createPayload.agentPreset = preset;
-      const created = await dshRpc(base, 'session.create', createPayload, 20000);
-      entry = {
-        dshSessionId: created.sessionId,
-        modelSet: false,
-        workspacePath
-      };
-      map[chatKey] = entry;
-    } else {
-      stream.progress('复用本对话的 DSH 会话：' + entry.dshSessionId);
-    }
-    await gContext.globalState.update(CHAT_MAP_KEY, map);
-
-    // 2. 可选：按配置把 DSH 会话切换到指定模型（如 DeepSeek v4 pro）
-    const provider = cfg().get('dshPanel.chatProvider', '');
-    const model = cfg().get('dshPanel.chatModel', '');
-    if (provider && model && !entry.modelSet) {
-      stream.progress('正在为 DSH 会话选择模型：' + provider + '/' + model + '…');
-      try {
-        await dshRpc(base, 'session.selectModel', { sessionId: entry.dshSessionId, provider, model }, 20000);
-        entry.modelSet = true;
-      } catch (e) {
-        stream.progress('设置模型失败（' + e.message + '），将使用 DSH 默认模型');
-      }
-    }
-
-    // 2.5 Copilot 侧对话同步（复用已定位的聊天轮次，不重复解析）
-    let interimText = '';
-    if (cfg().get('dshPanel.chatSyncInterim', true)) {
-      try {
-        if (source === 'proxy') {
-          if (await ensureProxyRunning()) {
-            interimText = await fetchInterimConversation(chatContext);
-          }
-        } else if (currentChat) {
-          interimText = extractInterimFromLocated(currentChat, chatContext, request);
-        }
-        if (interimText) {
-          stream.progress('已同步 Copilot 侧对话（' + interimText.length + ' 字符）');
-        }
-      } catch (e) {
-        console.warn('[DeepSeek Harness] 对话同步失败：', e && e.message);
-      }
-    }
-
-    // 3. 组装任务文本：中间对话 + 本对话此前 @dsh 问答（context.history）+ 文件引用 + 当前提问
-    const parts = [];
-    if (interimText) {
-      parts.push('【Copilot 侧中间对话（上次 @dsh 之后、你切换到其它模型产生的问答）】\n' + interimText);
-    }
-    if (hist.length > 0) {
-      parts.push('【本对话中此前通过 @dsh 的问答上下文】\n' + serializeChatHistory(hist));
-    }
-    const refsText = serializeChatReferences(request);
-    if (refsText) {
-      parts.push('【本次提问相关的文件引用】\n' + refsText);
-    }
-    parts.push('【当前需要你解决的问题】\n' + ((request && request.prompt) || ''));
-    const task = parts.join('\n\n---\n\n');
-
-    // 4. 记录当前会话已有事件的游标（复用会话时避免把旧对话重放回 Copilot）。
-    let lastSeq = 0;
-    try {
-      const pre = await dshRpc(base, 'session.history', { sessionId: entry.dshSessionId }, 15000);
-      const preEvents = (pre && Array.isArray(pre.events)) ? pre.events : [];
-      for (const item of preEvents) {
-        const e = item && item.event ? item.event : item;
-        if (e && typeof e.seq === 'number' && e.seq > lastSeq) lastSeq = e.seq;
-      }
-    } catch (_) { /* 读不到游标就从 0 开始（新会话无旧事件，不影响） */ }
-
-    // 5. 提交给 DSH（异步队列）
-    stream.progress('已提交给 DSH' + (provider && model ? '（' + provider + '/' + model + '）' : '（DSH 默认模型）') + '，正在执行…可在 DSH 面板查看实时过程');
-    await dshRpc(base, 'session.prompt', {
-      sessionId: entry.dshSessionId,
-      mode: 'queue',
-      content: [{ type: 'text', text: task }]
-    }, 30000);
-    // 6. 轮询 DSH 会话事件流，text-delta 增量流式回写
-    const timeoutMs = Number(cfg().get('dshPanel.chatTimeoutMs', CHAT_TIMEOUT_DEFAULT)) || CHAT_TIMEOUT_DEFAULT;
-    const deadline = Date.now() + timeoutMs;
-    const pollMs = 1000;
-    let pending = '';
-    let lastFlush = Date.now();
-    let started = false;
-    let completed = false;
-    let finalText = '';
-    let lastAssistantText = '';
-
-    while (Date.now() < deadline) {
-      if (token.isCancellationRequested) {
-        stream.markdown('\n\n> ⏹ 已停止等待。任务仍在 DSH 中运行，可打开 DSH 面板查看或继续追问。');
-        return;
-      }
-      let hist;
-      try {
-        hist = await dshRpc(base, 'session.history', { sessionId: entry.dshSessionId }, 15000);
-      } catch (e) {
-        stream.markdown('\n\n> ⚠️ 读取 DSH 任务状态失败：' + e.message + '（任务可能仍在运行，可到 DSH 面板查看）');
-        break;
-      }
-      const events = (hist && Array.isArray(hist.events)) ? hist.events : [];
-      for (const item of events) {
-        const e = item && item.event ? item.event : item;
-        if (!e || typeof e.seq !== 'number' || e.seq <= lastSeq) continue;
-        lastSeq = e.seq;
-        if (e.type === 'turn/start') {
-          started = true;
-        } else if (e.type === 'step/start' && started) {
-          const desc = stepDescription(e);
-          stream.progress(desc ? 'DSH 执行中：' + desc : 'DSH 执行中…');
-        } else if (e.type === 'assistant/chunk' && started && e.data && e.data.chunk) {
-          const c = e.data.chunk;
-          if (c.type === 'text-delta' && typeof c.text === 'string' && c.text.length > 0) {
-            pending += c.text;
-            finalText += c.text;
-            if (pending.length >= 80 || (Date.now() - lastFlush) >= 1500) {
-              stream.markdown(pending);
-              pending = '';
-              lastFlush = Date.now();
-            }
-          }
-        } else if (e.type === 'assistant/message' && e.data && e.data.message) {
-          const blocks = (e.data.message.content || [])
-            .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
-            .map((b) => b.text);
-          const joined = blocks.join('');
-          if (joined) lastAssistantText = joined;
-        } else if (e.type === 'turn/end' && started) {
-          if (pending) {
-            stream.markdown(pending);
-            pending = '';
-          }
-          completed = true;
-          const reason = e.data && e.data.reason;
-          if (reason && reason.kind !== 'completed') {
-            const errDesc = reason.error
-              ? (reason.error.code + ': ' + reason.error.message)
-              : reason.kind;
-            stream.markdown('\n\n> ⚠️ DSH 任务未正常完成（' + errDesc + '）。可打开 DSH 面板查看详细过程。');
-          }
-          break;
-        }
-      }
-      if (completed) break;
-      await sleep(pollMs);
-    }
-
-    if (!completed && !token.isCancellationRequested) {
-      if (!finalText && lastAssistantText) {
-        stream.markdown(lastAssistantText);
-      }
-      stream.markdown('\n\n> ⏱ 超过等待上限（' + Math.round(timeoutMs / 60000) + ' 分钟）仍未完成。任务仍在 DSH 面板中运行，可稍后查看，或调大 dshPanel.chatTimeoutMs。');
-    }
-
-    await gContext.globalState.update(CHAT_MAP_KEY, map);
-  } catch (e) {
-    stream.markdown('❌ /dsh 执行出错：' + (e && e.message ? e.message : String(e)));
-  }
-}
-
 
 // =====================================================================
 // 磁盘直读：解析 VS Code 私有的 chatSessions/*.jsonl 会话文件
@@ -1532,12 +1027,11 @@ async function dshChatHandler(request, chatContext, stream, token) {
  * @param {string} filePath
  * @returns {{ sessionId: string|null, turns: any[] }}
  */
-function parseChatSessionFile(filePath) {
+function parseChatSessionText(text) {
   const turns = [];
   let sessionId = null;
   try {
-    const text = fs.readFileSync(filePath, 'utf8');
-    const lines = text.split(/\r?\n/).filter(Boolean);
+    const lines = String(text || '').split(/\r?\n/).filter(Boolean);
     let state = null;
     const seen = new Set();
     for (const line of lines) {
@@ -1567,7 +1061,9 @@ function parseChatSessionFile(filePath) {
       seen.add(req.requestId);
       const user = (req.message && (typeof req.message.text === 'string'
         ? req.message.text
-        : (req.message.parts && req.message.parts[0] && req.message.parts[0].text))) || '';
+        : (Array.isArray(req.message.parts)
+          ? req.message.parts.map((pp) => (pp && typeof pp.text === 'string' ? pp.text : '')).join('\n')
+          : ''))) || '';
       const assistant = ((req.response || [])
         .map((p) => (p && typeof p.value === 'string' ? p.value : ''))
         .filter(Boolean))
@@ -1581,174 +1077,140 @@ function parseChatSessionFile(filePath) {
       });
     }
   } catch (e) {
-    console.warn('[DeepSeek Harness] 解析会话文件失败：', filePath, e && e.message);
+    console.warn('[DeepSeek Harness] 解析会话文本失败：', e && e.message);
   }
   return { sessionId, turns };
 }
 
 /**
- * 枚举最近修改的会话文件（工作区窗口 + 空窗口）。
- * @returns {{file: string, mtimeMs: number}[]} 按修改时间倒序。
+ * 同步解析一个会话 .jsonl 文件（读盘 + 解析）。
+ * @param {string} filePath
+ * @returns {{sessionId: string|null, turns: any[]}}
  */
-function listChatSessionFiles() {
+function parseChatSessionFile(filePath) {
+  try {
+    return parseChatSessionText(fs.readFileSync(filePath, 'utf8'));
+  } catch (e) {
+    console.warn('[DeepSeek Harness] 解析会话文件失败：', filePath, e && e.message);
+    return { sessionId: null, turns: [] };
+  }
+}
+
+/**
+ * 异步 + 缓存的会话文件读取（mtime+size 不变则 10 秒内命中缓存）：
+ * 并发聊天时避免每个请求重复全量读盘/解析，减少扩展宿主阻塞。
+ * @param {string} file
+ * @returns {Promise<{sessionId: string|null, turns: any[]}|null>}
+ */
+const chatFileReadCache = new Map();
+async function readChatSessionCached(file) {
+  let st;
+  try { st = fs.statSync(file); } catch (_) { return null; }
+  const hit = chatFileReadCache.get(file);
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size && (Date.now() - hit.ts) < 10000) {
+    return hit.value;
+  }
+  let text;
+  try { text = await fs.promises.readFile(file, 'utf8'); } catch (_) { return null; }
+  const value = parseChatSessionText(text);
+  chatFileReadCache.set(file, { ts: Date.now(), mtimeMs: st.mtimeMs, size: st.size, value });
+  if (chatFileReadCache.size > 40) {
+    const oldest = chatFileReadCache.keys().next().value;
+    if (oldest) chatFileReadCache.delete(oldest);
+  }
+  return value;
+}
+
+/**
+ * 枚举 VS Code 用户数据目录（跨平台 + 远程）：
+ * - Windows: %APPDATA%\Code\User
+ * - macOS: ~/Library/Application Support/Code/User
+ * - Linux 桌面: ~/.config/Code/User
+ * - vscode-server（Remote-SSH / WSL / 容器）: ~/.vscode-server/data/User
+ * - 旧版 vscode-remote: ~/.vscode-remote/data/User
+ * 全部候选都会尝试，不存在的自动跳过（存在性由调用方检查）。
+ * @returns {string[]}
+ */
+function chatUserDataDirs() {
+  const home = os.homedir();
+  const dirs = [];
+  if (process.platform === 'win32') dirs.push(path.join(home, 'AppData', 'Roaming', 'Code', 'User'));
+  if (process.platform === 'darwin') dirs.push(path.join(home, 'Library', 'Application Support', 'Code', 'User'));
+  dirs.push(path.join(home, '.config', 'Code', 'User'));
+  dirs.push(path.join(home, '.vscode-server', 'data', 'User'));
+  dirs.push(path.join(home, '.vscode-remote', 'data', 'User'));
+  const seen = new Set();
+  return dirs.filter((d) => { if (seen.has(d)) return false; seen.add(d); return true; });
+}
+
+/**
+ * 从 workspace.json 的 folder 字段提取本地路径（file:/// 与 vscode-remote:// 均支持），
+ * 用于判断某个 workspaceStorage 哈希目录是否属于当前工作区。
+ * @param {string} folderUri
+ * @returns {string|null}
+ */
+function folderPathFromWorkspaceJson(folderUri) {
+  if (!folderUri || typeof folderUri !== 'string') return null;
+  try {
+    const u = new URL(folderUri);
+    let p = decodeURIComponent(u.pathname || '');
+    if (process.platform === 'win32' && /^\/[A-Za-z]:/.test(p)) p = p.slice(1);
+    return path.normalize(p);
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * 枚举最近修改的会话文件（工作区窗口 + 空窗口），当前工作区优先、其余工作区兜底。
+ * @param {number} [lookbackMinOverride]
+ * @returns {{file: string, mtimeMs: number}[]} 按（当前工作区优先 →）修改时间倒序。
+ */
+function listChatSessionFiles(lookbackMinOverride) {
   const out = [];
   const now = Date.now();
-  const lookbackMs = (Number(cfg().get('dshPanel.chatSyncLookbackMin', 60)) || 60) * 60 * 1000;
-  const userDirs = [];
-  if (process.platform === 'win32') {
-    userDirs.push(path.join(os.homedir(), 'AppData', 'Roaming', 'Code', 'User'));
-  }
-  userDirs.push(path.join(os.homedir(), '.config', 'Code', 'User'));
-  const roots = [];
-  for (const u of userDirs) {
+  const lookbackMs = ((lookbackMinOverride != null ? lookbackMinOverride : (Number(cfg().get('dshPanel.chatSyncLookbackMin', 60)) || 60))) * 60 * 1000;
+  const localDir = getWorkspaceDir();
+  const normLocal = (() => {
+    try {
+      const n = path.normalize(String(localDir || ''));
+      return process.platform === 'win32' ? n.toLowerCase() : n;
+    } catch (_) { return String(localDir || ''); }
+  })();
+  const roots = []; // { dir, pri } pri=1 当前工作区，0 其他
+  for (const u of chatUserDataDirs()) {
     const ws = path.join(u, 'workspaceStorage');
     try {
       for (const d of fs.readdirSync(ws)) {
+        let pri = 0;
+        try {
+          const wj = JSON.parse(fs.readFileSync(path.join(ws, d, 'workspace.json'), 'utf8'));
+          const folder = (wj && (wj.folder || (wj.workspace && typeof wj.workspace === 'string' ? wj.workspace : null))) || null;
+          const fp = folderPathFromWorkspaceJson(folder);
+          if (fp) {
+            const n = process.platform === 'win32' ? fp.toLowerCase() : fp;
+            if (n === normLocal || n.startsWith(normLocal + path.sep) || normLocal.startsWith(n + path.sep)) pri = 1;
+          }
+        } catch (_) { /* workspace.json 缺失/异常则视为其他工作区 */ }
         const p = path.join(ws, d, 'chatSessions');
-        if (fs.existsSync(p)) roots.push(p);
+        if (fs.existsSync(p)) roots.push({ dir: p, pri });
       }
     } catch (_) { /* 不存在则跳过 */ }
     const empty = path.join(u, 'globalStorage', 'emptyWindowChatSessions');
-    if (fs.existsSync(empty)) roots.push(empty);
+    if (fs.existsSync(empty)) roots.push({ dir: empty, pri: 1 });
   }
-  for (const dir of roots) {
+  for (const r of roots) {
     let files = [];
-    try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')); } catch (_) { continue; }
+    try { files = fs.readdirSync(r.dir).filter((f) => f.endsWith('.jsonl')); } catch (_) { continue; }
     for (const f of files) {
-      const fp = path.join(dir, f);
+      const fp = path.join(r.dir, f);
       let st;
       try { st = fs.statSync(fp); } catch (_) { continue; }
-      if (now - st.mtimeMs < lookbackMs) out.push({ file: fp, mtimeMs: st.mtimeMs });
+      if (now - st.mtimeMs < lookbackMs) out.push({ file: fp, mtimeMs: st.mtimeMs, pri: r.pri });
     }
   }
-  out.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  out.sort((a, b) => (b.pri - a.pri) || (b.mtimeMs - a.mtimeMs));
   return out;
-}
-
-/**
- * 轮次文本序列化（去掉 @dsh 前缀，跳过垃圾内容）。
- * @param {any[]} turns
- * @returns {string}
- */
-function serializeDiskTurns(turns) {
-  const out = [];
-  for (const t of turns) {
-    if (!t) continue;
-    const u = (t.user || '').trim().replace(/^\s*@dsh\s+/i, '');
-    const a = (t.assistant || '').trim();
-    if (u && !isJunkUserText(u)) out.push('用户：' + u);
-    if (a) out.push('助手：' + a);
-  }
-  return out.join('\n\n');
-}
-
-/**
- * 磁盘直读同步：定位当前聊天会话文件，提取对话内容。
- * - 有 @dsh 历史：用「最后一次 @dsh 提问」定位，取其后（中间对话增量）；
- * - 首次 @dsh：当前请求已写在会话文件末尾（agent=dsh 且 user 匹配当前提问），
- *   取其前全部自定义模型问答 = 整个对话窗口的完整补课；
- *   回退：取最近一条含自定义模型轮次的会话的全部轮次。
- * @param {any} chatContext
- * @param {any} request
- * @returns {Promise<string>}
- */
-function diskMatchUser(t, p) {
-  const q = String(p || '').trim();
-  if (!q || !t || !t.user) return false;
-  const u = t.user.trim();
-  return u === q || u === '@dsh ' + q || u.endsWith(q);
-}
-
-function diskAnchorPrompts(chatContext) {
-  const hist = (chatContext && Array.isArray(chatContext.history)) ? chatContext.history : [];
-  const anchors = [];
-  for (let i = hist.length - 1; i >= 0; i--) {
-    const t = hist[i];
-    if (t && typeof t.prompt === 'string' && t.prompt) { anchors.push(t.prompt); break; }
-  }
-  if (hist.length > 0 && hist[0] && typeof hist[0].prompt === 'string' && hist[0].prompt && !anchors.includes(hist[0].prompt)) {
-    anchors.push(hist[0].prompt);
-  }
-  return anchors;
-}
-
-/**
- * 定位当前 Copilot 聊天：会话文件 kind:0 的 sessionId 是 Copilot 新会话的唯一标签，
- * 用「当前 @dsh 提问 / 上次 @dsh 提问」在文件轮次中精确匹配（有的放矢，非盲扫）。
- * @param {any} chatContext
- * @param {any} request
- * @returns {{ sessionId: string|null, turns: any[], anchorIdx: number } | null}
- */
-function locateCurrentChatFromDisk(chatContext, request) {
-  try {
-    const prompt = (request && request.prompt) || '';
-    const sessions = listChatSessionFiles()
-      .map((f) => {
-        const p = parseChatSessionFile(f.file);
-        return { mtimeMs: f.mtimeMs, sessionId: p.sessionId, turns: p.turns };
-      })
-      .filter((s) => s.turns.length > 0);
-
-    if (diskAnchorPrompts(chatContext).length > 0) {
-      for (const anchor of diskAnchorPrompts(chatContext)) {
-        for (const s of sessions) {
-          for (let i = s.turns.length - 1; i >= 0; i--) {
-            if (s.turns[i].agent === 'dsh' && diskMatchUser(s.turns[i], anchor)) {
-              return { sessionId: s.sessionId, turns: s.turns, anchorIdx: i };
-            }
-          }
-        }
-      }
-      return null;
-    }
-    // 首次 @dsh：当前请求已写入会话文件末尾（agent=dsh 且提问匹配）
-    for (const s of sessions) {
-      const last = s.turns[s.turns.length - 1];
-      if (last && last.agent === 'dsh' && diskMatchUser(last, prompt)) {
-        return { sessionId: s.sessionId, turns: s.turns, anchorIdx: s.turns.length - 1 };
-      }
-    }
-    // 回退：最近一条含自定义模型轮次的会话（仅用于补课；sessionId 置 null 不作映射键）
-    for (const s of sessions) {
-      if (s.turns.some((t) => t.agent !== 'dsh' && t.user)) {
-        return { sessionId: null, turns: s.turns, anchorIdx: -1 };
-      }
-    }
-    return null;
-  } catch (e) {
-    console.warn('[DeepSeek Harness] 定位当前聊天失败：', e && e.message);
-    return null;
-  }
-}
-
-/**
- * 从已定位的聊天轮次中提取要注入 DSH 的对话内容。
- * @param {{ sessionId: string|null, turns: any[], anchorIdx: number }} located
- * @param {any} chatContext
- * @param {any} request
- * @returns {string}
- */
-function extractInterimFromLocated(located, chatContext, request) {
-  const maxChars = Number(cfg().get('dshPanel.chatSyncMaxChars', 500000)) || 500000;
-  const turns = (located && Array.isArray(located.turns)) ? located.turns : [];
-  if (!turns.length) return '';
-  const anchors = diskAnchorPrompts(chatContext);
-  if (anchors.length > 0) {
-    for (const anchor of anchors) {
-      for (let i = turns.length - 1; i >= 0; i--) {
-        if (turns[i].agent === 'dsh' && diskMatchUser(turns[i], anchor)) {
-          return compressChatText(serializeDiskTurns(turns.slice(i + 1)), maxChars);
-        }
-      }
-    }
-    return '';
-  }
-  const prompt = (request && request.prompt) || '';
-  const last = turns[turns.length - 1];
-  if (last && last.agent === 'dsh' && diskMatchUser(last, prompt)) {
-    return compressChatText(serializeDiskTurns(turns.slice(0, -1)), maxChars);
-  }
-  return compressChatText(serializeDiskTurns(turns.filter((t) => t.agent !== 'dsh' && t.user)), maxChars);
 }
 
 // =====================================================================
@@ -1814,29 +1276,91 @@ function findLmUserIndex(messages, lastUserText) {
 }
 
 /**
- * 从磁盘会话文件中定位当前聊天（当前提问已落盘为最后一条请求）。
- * @param {string} currentPrompt
- * @returns {string|null}
+ * 归一化聊天文件里记录的原始用户提问（去掉 <prompt>/<userRequest>/instructions 包裹），
+ * 与 lmMessageText 对 VS Code 消息的清洗规则对齐。
+ * @param {string} u
+ * @returns {string}
  */
-function locateModelChatSessionId(currentPrompt) {
+function normalizeFileUserText(u) {
+  const raw = String(u || '').trim();
+  if (!raw) return '';
+  const inner = extractUserRequest(raw);
+  if (inner !== null) return inner;
+  const cleaned = stripCopilotContext(raw);
+  if (!cleaned) return '';
+  const inner2 = extractUserRequest(cleaned);
+  if (inner2 !== null) return inner2;
+  return cleaned;
+}
+
+/**
+ * 定位当前 Copilot 聊天的 sessionId（聊天文件名）。
+ * 主路径（零竞态）：当前请求落盘有几秒延迟，但「上一轮提问」早已落盘——
+ * 用「文件最后一条提问（归一化）== 当前转录里的上一个提问（prevPrompt）」认领聊天文件；
+ * 多个候选（多聊天同开、镜像聊天）时取「最后提问时间戳最大」者 = 最近活跃的那个聊天。
+ * 兜底：首轮（无 prevPrompt）或历史被编辑时，轮询等当前请求落盘（文本全等 + ts 新鲜）。
+ * @param {string} currentPrompt
+ * @param {any[]} messages
+ * @returns {Promise<string|null>}
+ */
+async function locateModelChatSessionId(currentPrompt, messages) {
   const q = String(currentPrompt || '').trim();
-  if (!q) return null;
-  try {
-    const sessions = listChatSessionFiles()
-      .map((f) => {
-        const p = parseChatSessionFile(f.file);
-        return { sessionId: p.sessionId, turns: p.turns };
-      })
-      .filter((s) => s.turns.length > 0);
-    for (const s of sessions) {
-      const last = s.turns[s.turns.length - 1];
-      if (last && last.user) {
-        const u = last.user.trim();
-        if (u === q || u === '@dsh ' + q || u.endsWith(q)) return s.sessionId;
+  const prevPrompt = prevLmUserText(messages);
+  if (!q && !prevPrompt) return null;
+  const FRESH_TURN_MS = 3 * 60 * 1000;
+  const FRESH_EMPTY_MS = 60 * 1000;
+  // 单次扫描：宽回看（24h）+ 最近 12 文件（当前工作区优先 + mtime 倒序）。
+  // - hitPrev：文件最后一条提问（归一化）== 上一轮提问（无 ts 门控，老聊天恢复兼容）；
+  // - hitCur：文件最后一条提问 == 当前提问且 ts 新鲜（请求已落盘的快路径）；
+  // - 空聊天文件（只有 kind:0 元数据、无任何请求）：新建聊天在第一问期间就是这种状态
+  //   （实测请求在回答完成后才写入文件），记录最近 60 秒内最新的一个作为首轮候选。
+  const scanOnce = async () => {
+    const now = Date.now();
+    let bestId = null;
+    let bestTs = 0;
+    let newestEmptyId = null;
+    let newestEmptyMtime = 0;
+    try {
+      const files = listChatSessionFiles(60 * 24).slice(0, 12);
+      for (const f of files) {
+        const p = await readChatSessionCached(f.file);
+        if (!p || !p.sessionId) continue;
+        if (!Array.isArray(p.turns) || !p.turns.length) {
+          if ((now - f.mtimeMs) < FRESH_EMPTY_MS && f.mtimeMs > newestEmptyMtime) {
+            newestEmptyMtime = f.mtimeMs;
+            newestEmptyId = p.sessionId;
+          }
+          continue;
+        }
+        const last = p.turns[p.turns.length - 1];
+        if (!last || !last.user) continue;
+        const nu = normalizeFileUserText(last.user);
+        const lastTs = (typeof last.ts === 'number' && last.ts > 0) ? last.ts : 0;
+        const hitPrev = prevPrompt ? (nu === prevPrompt) : false;
+        const hitCur = q ? (nu === q && (now - lastTs) < FRESH_TURN_MS) : false;
+        if ((hitPrev || hitCur) && lastTs > bestTs) {
+          bestTs = lastTs;
+          bestId = p.sessionId;
+        }
       }
+    } catch (_) { /* 定位失败回退哈希键 */ }
+    return { bestId, newestEmptyId };
+  };
+  if (prevPrompt) {
+    // 非首轮：上一轮必已落盘，通常一次命中；仍轻量重试两次覆盖「恢复很久没聊的聊天」
+    // （当前请求一落盘即可通过 hitCur 命中）。
+    for (let i = 0; i < 3; i++) {
+      if (i > 0) await sleep(i === 1 ? 600 : 1500);
+      const { bestId } = await scanOnce();
+      if (bestId) return bestId;
     }
-  } catch (_) { /* 定位失败回退哈希键 */ }
-  return null;
+    return null;
+  }
+  // 首轮：不轮询等落盘（实测请求在回答完成后才写入文件，等待只会白耗约 8 秒、
+  // 拖慢新聊天第一问并造成并发聊天「串行」观感）。先试 hitCur 快路径，
+  // 再取「最近 60 秒内新建的空聊天文件」= 当前新聊天（零等待）。
+  const { bestId, newestEmptyId } = await scanOnce();
+  return bestId || newestEmptyId || null;
 }
 
 /**
@@ -1939,9 +1463,18 @@ function lmMessageText(m) {
       }
       return '【Copilot 记忆】\n' + memText;
     }
-    // 优先提取 <userRequest> 内的真实提问
+    // 优先提取 <userRequest> / <prompt> 内的真实提问（VS Code 会把提问包在 <prompt> 里，
+    // 前面是 instructions/AGENTS.md 等上下文——只保留提问本身，避免污染会话与身份键）
     const inner = extractUserRequest(text);
     if (inner !== null) return '用户：' + inner;
+    // 剥掉 Copilot instructions 前置说明与 <instructions> 块后，若还有真实内容则继续
+    const cleaned = stripCopilotContext(text);
+    if (cleaned !== text) {
+      if (!cleaned) return ''; // 纯 instructions/上下文 → 丢弃
+      text = cleaned;
+      const inner2 = extractUserRequest(text);
+      if (inner2 !== null) return '用户：' + inner2;
+    }
     // 垃圾块开头：剥离前缀保留尾部真实内容，而不是整条丢弃
     if (isJunkUserText(text)) {
       const stripped = stripJunkPrefix(text);
@@ -1953,7 +1486,7 @@ function lmMessageText(m) {
   // 助手消息：剥掉我们上一轮发出的「⏳ 已提交给 DeepSeek Harness…」占位前缀，
   // 避免它作为对话上下文回传给 DSH（保留其后真正的回答内容）
   {
-    const marker = '⏳ 已提交给 DeepSeek Harness';
+    const marker = DSH_ANSWER_MARKER;
     const mi = text.indexOf(marker);
     if (mi >= 0) {
       const nl = text.indexOf('\n\n', mi + marker.length);
@@ -1968,16 +1501,91 @@ function lmMessageText(m) {
   return '助手：' + text;
 }
 
+/** DSH 答案在 VS Code 转录里的产地标记（流式回写时作为首段文本）。 */
+const DSH_ANSWER_MARKER = '⏳ 已提交给 DeepSeek Harness';
+
+/**
+ * 提取单条消息的原始文本（不做任何清洗），用于产地标记检测。
+ * @param {any} m
+ * @returns {string}
+ */
+function lmRawText(m) {
+  if (!m) return '';
+  let text = '';
+  if (typeof m.content === 'string') {
+    text = m.content;
+  } else if (Array.isArray(m.content)) {
+    text = m.content
+      .map((p) => {
+        if (!p) return '';
+        if (typeof p === 'string') return p;
+        if (typeof p.value === 'string') return p.value;
+        if (typeof p.content === 'string') return p.content;
+        if (typeof p.text === 'string') return p.text;
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+  return text;
+}
+
+/**
+ * 判断一条消息是否为 DSH 自己产出的回答（带 ⏳ 产地标记的 assistant 消息）。
+ * @param {any} m
+ * @returns {boolean}
+ */
+function isDshProducedAnswer(m) {
+  const role = m && m.role;
+  const isAssistant = role === 'assistant' || role === 2 || role === 'Assistant';
+  if (!isAssistant) return false;
+  return lmRawText(m).indexOf(DSH_ANSWER_MARKER) >= 0;
+}
+
+/**
+ * 找到 messages 里最后一条「DSH 已知」消息的下标（边界）。
+ * - 主信号：最后一条带 ⏳ 产地标记的 assistant（DSH 自己流式产出的答案），最可靠；
+ * - 辅信号（无标记时兜底）：lastUserText 对应的用户提问，紧邻其后的 assistant 即 DSH 同轮答案；
+ * 找不到返回 -1。
+ * 边界之后 = 切走期间其他模型的问答（外来段）+ 当前提问，是 DSH 唯一需要接收的增量。
+ */
+function findDshKnownBoundary(messages, lastUserText) {
+  for (let i = (messages || []).length - 1; i >= 0; i--) {
+    if (isDshProducedAnswer(messages[i])) return i;
+  }
+  if (lastUserText) {
+    const idx = findLmUserIndex(messages, lastUserText);
+    if (idx >= 0) {
+      for (let j = idx + 1; j < (messages || []).length; j++) {
+        const m = messages[j];
+        const role = m && m.role;
+        const isUser = role === 'user' || role === 1 || role === 'User';
+        const isAssistant = role === 'assistant' || role === 2 || role === 'Assistant';
+        if (isAssistant) return j;
+        if (isUser) break; // 答案被编辑/丢失 → 不视为已知
+      }
+    }
+  }
+  return -1;
+}
+
 /**
  * 把 VS Code 交给模型的消息列表序列化为纯对话文本。
  * @param {any[]} messages
+ * @param {{markForeignAssistant?: boolean}} [opts] markForeignAssistant=true 时给外来 assistant 打产地标签
  * @returns {string}
  */
-function serializeLmMessages(messages) {
+function serializeLmMessages(messages, opts) {
+  const markForeign = !!(opts && opts.markForeignAssistant);
   const out = [];
   for (const m of messages || []) {
     const s = lmMessageText(m);
-    if (s) out.push(s);
+    if (!s) continue;
+    if (markForeign && s.startsWith('助手：')) {
+      out.push('【Copilot 其他模型回答】' + s);
+    } else {
+      out.push(s);
+    }
   }
   return out.join('\n\n');
 }
@@ -2007,16 +1615,85 @@ const SYNTHETIC_PROGRESS_TEXTS = {
 };
 
 /**
+ * 回放/等待 DSH 会话当前轮的回答到本次 provider 调用（去重场景专用）：
+ * 同一提问被 VS Code 重复投递时，不新建会话、不重复提交 prompt，只把已有/正在产出的回答
+ * 再流式给本调用，保证「裸提问」与「带上下文」两次调用都能拿到答案。
+ */
+async function replayDshAnswer(base, sid, timeoutMs, progress, token) {
+  const deadline = Date.now() + timeoutMs;
+  let lastSeq = 0;
+  let started = false;
+  try {
+    const pre = await dshRpc(base, 'session.history', { sessionId: sid }, 15000);
+    const events = (pre && Array.isArray(pre.events)) ? pre.events : [];
+    for (const item of events) {
+      const e = item && item.event ? item.event : item;
+      if (e && typeof e.seq === 'number' && e.type === 'turn/start') lastSeq = e.seq > 0 ? e.seq - 1 : 0;
+    }
+  } catch (_) { /* 拿不到起点就从 0 开始 */ }
+  let blockEndSeen = false;
+  while (Date.now() < deadline) {
+    if (token.isCancellationRequested) return;
+    let hist;
+    try {
+      hist = await dshRpc(base, 'session.history', { sessionId: sid }, 15000);
+    } catch (_) { return; }
+    const events = (hist && Array.isArray(hist.events)) ? hist.events : [];
+    let ended = false;
+    for (const item of events) {
+      const e = item && item.event ? item.event : item;
+      if (!e || typeof e.seq !== 'number' || e.seq <= lastSeq) continue;
+      lastSeq = e.seq;
+      if (e.type === 'turn/start') {
+        started = true;
+        blockEndSeen = false;
+      } else if (e.type === 'assistant/chunk' && e.data && e.data.chunk) {
+        const c = e.data.chunk;
+        if (c.type === 'block-end' && c.block && typeof c.block.text === 'string' && c.block.text.length > 0) {
+          blockEndSeen = true;
+          if (!started) started = true;
+          progress.report(makeTextPart(c.block.text));
+        } else if (c.type === 'text-delta' && !blockEndSeen && typeof c.text === 'string' && c.text.length > 0) {
+          if (!started) started = true;
+          progress.report(makeTextPart(c.text));
+        }
+      } else if (e.type === 'turn/end') {
+        ended = true;
+      }
+    }
+    if (ended) return;
+    await sleep(1000);
+  }
+}
+
+/**
  * dsh 语言模型提供方的请求处理。
  * @param {any[]} messages
  * @param {any} progress Progress<LanguageModelResponsePart>
  * @param {any} token CancellationToken
  * @returns {Promise<void>}
  */
-async function handleDshModelRequest(messages, options, progress, token) {
+async function handleDshModelRequest(model, messages, options, progress, token) {
   const base = getUrl().replace(/\/+$/, '');
-  const provider = cfg().get('dshPanel.chatProvider', '');
-  const model = cfg().get('dshPanel.chatModel', '');
+  // 解析模型选择：dsh-deepseek-* 固定映射 DeepSeek 官方模型；dsh 条目跟随 VS Code 配置
+  const fixed = resolveDshModelSelection((model && model.id) || 'dsh');
+  const provider = fixed ? fixed.provider : cfg().get('dshPanel.chatProvider', '');
+  const chatModel = fixed ? fixed.model : cfg().get('dshPanel.chatModel', '');
+  // 推理档位：VS Code 界面选择（options.modelConfiguration.reasoningEffort）优先，
+  // 其次 dshPanel.dshReasoningEffort 配置兜底，最后跟随 DSH 默认。
+  // 映射：none/off → off；low/high/max 直通（DSH 实测支持值）；其余忽略。
+  const DSH_EFFORTS = ['off', 'low', 'high', 'max'];
+  const EFFORT_MAP = { none: 'off', off: 'off', low: 'low', high: 'high', max: 'max' };
+  const uiEffort = String((options && (options.modelConfiguration || {}).reasoningEffort) || (options && (options.configuration || {}).reasoningEffort) || '');
+  let effort = uiEffort || String(cfg().get('dshPanel.dshReasoningEffort', '') || '');
+  if (EFFORT_MAP[effort]) effort = EFFORT_MAP[effort];
+  if (effort && !DSH_EFFORTS.includes(effort)) effort = ''; // 无效档位 → 跟随 DSH 默认
+  const displayModel = fixed ? fixed.model : (chatModel || 'DSH 默认模型');
+  const selectionKey = provider && chatModel ? (provider + '/' + chatModel + (effort ? '/' + effort : '')) : '';
+  const currentPrompt = lastLmUserText(messages);
+  // 提前并行定位当前聊天 sessionId（聊天文件名）：落盘有几秒竞态，
+  // 提前开始轮询可把等待藏在 DSH 就绪检查之后，不拖慢首答。
+  const sessionIdPromise = currentPrompt ? locateModelChatSessionId(currentPrompt, messages) : Promise.resolve(null);
   try {
     // 合成请求（VS Code UI 辅助）：本地秒答，不转发 DSH、不建 DSH 会话
     const synthetic = detectSyntheticRequest(messages);
@@ -2053,9 +1730,33 @@ async function handleDshModelRequest(messages, options, progress, token) {
         fs.mkdirSync(debugDir, { recursive: true });
         const dump = {
           ts: Date.now(),
+          model: {
+            id: model && model.id,
+            vendor: model && model.vendor,
+            family: model && model.family,
+            version: model && model.version,
+            name: model && model.name,
+            modelKeys: model ? Object.keys(model) : []
+          },
           options: {
-            modelOptionsKeys: (options && options.modelOptions) ? Object.keys(options.modelOptions) : [],
-            toolsCount: (options && Array.isArray(options.tools)) ? options.tools.length : 0
+            allKeys: options ? Object.keys(options) : [],
+            shallow: (() => {
+              const o = {};
+              if (!options) return o;
+              for (const k of Object.keys(options)) {
+                try {
+                  const v = options[k];
+                  if (v === null || v === undefined) { o[k] = String(v); continue; }
+                  if (typeof v === 'object') {
+                    if (Array.isArray(v)) { o[k] = 'array[' + v.length + ']'; continue; }
+                    o[k] = { keys: Object.keys(v), json: JSON.stringify(v).slice(0, 600) };
+                  } else {
+                    o[k] = String(v).slice(0, 300);
+                  }
+                } catch (e) { o[k] = '<unserializable>'; }
+              }
+              return o;
+            })()
           },
           messages: (messages || []).map((m) => ({
             role: m.role,
@@ -2082,40 +1783,98 @@ async function handleDshModelRequest(messages, options, progress, token) {
       }
     }
 
-    // 聊天身份 → DSH 会话映射：同一 Copilot 聊天复用同一 DSH 会话（磁盘 sessionId 优先，哈希兜底）
+    // 聊天身份 → DSH 会话映射：直接以 Copilot 聊天文件名（sessionId）为键——
+    // 每个聊天唯一且稳定，一聊天对应一个 DSH 会话；仅当请求迟迟未落盘（极罕见）
+    // 才退到首问哈希兜底（仅供同题二次投递去重，转录校验防撞）。
     const workspacePath = getWorkspaceDir();
-    const currentPrompt = lastLmUserText(messages);
     const map = Object.assign({}, gContext.globalState.get(DSH_MODEL_MAP_KEY) || {});
-    const diskId = locateModelChatSessionId(currentPrompt);
+    const diskId = await sessionIdPromise;
     const chatKey = diskId
       ? ('m-' + String(diskId))
       : ('m-' + crypto.createHash('sha1').update(firstLmQuestionText(messages) || currentPrompt || 'first').digest('hex').slice(0, 16));
+    const FRESH_MS = 15 * 60 * 1000;
+    const entryFresh = (e, ms) => e && typeof e.lastUsedAt === 'number' && (Date.now() - e.lastUsedAt) < (ms || FRESH_MS);
     let entry = map[chatKey];
-    // 跨键容错：按 chatKey 没找到时（首轮哈希兜底、后续轮拿到磁盘 sessionId 等混用情况），
-    // 用「上一个提问」在映射表里找回属于同一聊天的条目。
+    // 直接命中校验（防串线）：同一聊天的转录里必然还留着「上次已发提问」；
+    // 找不到说明键撞车（别的聊天/旧聊天）→ 视作无条目（宁可新建，不可串线）。
+    // 首轮（无上一个提问）无法用转录校验，只能靠「同题 + 60 秒内活跃」判定是否为
+    // 同一提问的二次投递（VS Code 裸提问/带上下文两次调用相隔仅数秒）；
+    // 超过 60 秒视为别的聊天撞题 → 新建会话。
+    if (entry && entry.dshSessionId && entry.workspacePath === workspacePath) {
+      const prevPrompt = prevLmUserText(messages);
+      const isSameChat = prevPrompt
+        ? findLmUserIndex(messages, entry.lastUserText) >= 0
+        : (entry.lastUserText === currentPrompt && entryFresh(entry, 60 * 1000));
+      if (!isSameChat) entry = null;
+    }
+    // 兜底找回：极少数「请求迟迟未落盘 → 上一轮走了哈希键、本轮才拿到 sessionId 键」的情况，
+    // 在映射表里找回属于同一聊天的条目（sessionId 直接映射下的安全网）。
     if (!entry || !entry.dshSessionId || entry.workspacePath !== workspacePath) {
       const prevPrompt = prevLmUserText(messages);
       if (prevPrompt) {
+        // 非首轮转录找回：在所有同工作区、15 分钟内活跃的条目里，找「记录的上个提问仍出现在
+        // 当前转录中」的候选，优先选出现位置最靠后的（最接近当前提问 → 最可能是同一条对话）。
+        // 注意不能锚定 prevPrompt：切到其它模型后，紧邻的上一个提问是别的模型答的，
+        // 而条目记录的是最后一次 DSH 提问，两者未必相同（第二次切回时的断链根因）。
+        let best = null;
+        let bestIdx = -1;
         for (const k of Object.keys(map)) {
           const e = map[k];
-          if (e && e.dshSessionId && e.workspacePath === workspacePath && e.lastUserText === prevPrompt) {
+          if (!e || !e.dshSessionId || e.workspacePath !== workspacePath || !entryFresh(e)) continue;
+          const idx = findLmUserIndex(messages, e.lastUserText);
+          if (idx >= 0 && idx > bestIdx) { best = e; bestIdx = idx; }
+        }
+        if (best) {
+          entry = best;
+          map[chatKey] = best; // 登记到当前键下，后续保持一致
+        }
+      } else {
+        // 首轮：只允许 60 秒内的同题合并（VS Code 裸提问/带上下文两次调用相隔数秒）
+        for (const k of Object.keys(map)) {
+          const e = map[k];
+          if (e && e.dshSessionId && e.workspacePath === workspacePath
+            && e.lastUserText === currentPrompt && entryFresh(e, 60 * 1000)) {
             entry = e;
-            map[chatKey] = e; // 登记到当前键下，后续保持一致
+            map[chatKey] = e;
             break;
           }
         }
       }
+    }
+    // 去重：VS Code 会把同一次提问投递两次（「裸提问」+「instructions+<prompt>提问」），
+    // 归一化后 currentPrompt 相同；若该会话已有进行中/已完成的同题回合，直接返回空，
+    // 避免 DSH 出现两个会话或同题重复提交。
+    if (entry && entry.dshSessionId && entry.workspacePath === workspacePath
+      && entry.lastUserText === currentPrompt
+      && (entry.pending || entry.completed)
+      && entryFresh(entry, 60 * 1000)) {
+      await replayDshAnswer(base, entry.dshSessionId, Number(cfg().get('dshPanel.chatTimeoutMs', 900000)) || 900000, progress, token);
+      return;
     }
     let sid = null;
     let taskText = fullConvText;
     let isNewSession = false;
     if (entry && entry.dshSessionId && entry.workspacePath === workspacePath) {
       sid = entry.dshSessionId;
-      // 增量：找到上次已发的用户提问，只发其后新增的消息（DSH 会话自累积上下文）
-      const idx = findLmUserIndex(messages, entry.lastUserText);
-      if (idx >= 0) {
-        const delta = serializeLmMessages((messages || []).slice(idx + 1));
+      // 增量（方案A）：定位最后一条「DSH 已知」消息的边界，只发其后的内容——
+      // DSH 自己答过的轮次由 DSH 会话回放、不回传（省 token）；
+      // 切走期间其他模型的问答（外来段）+ 当前提问是 DSH 唯一缺失的信息，补发并打产地标签。
+      const boundary = findDshKnownBoundary(messages, entry.lastUserText);
+      if (boundary >= 0) {
+        const delta = serializeLmMessages((messages || []).slice(boundary + 1), { markForeignAssistant: true });
         if (delta.trim()) taskText = delta;
+      } else {
+        // 兜底：找不到产地标记（历史被编辑等）→ 退化为「上次已发提问之后」的增量
+        const idx = findLmUserIndex(messages, entry.lastUserText);
+        if (idx >= 0) {
+          const delta = serializeLmMessages((messages || []).slice(idx + 1));
+          if (delta.trim()) taskText = delta;
+        }
+      }
+      // 模型/档位切换：与上次选择不一致时重新 selectModel（同一聊天保持同一 DSH 会话）
+      if (selectionKey && entry.selection !== selectionKey) {
+        await selectModelForSession(base, sid, provider, chatModel, effort);
+        entry.selection = selectionKey;
       }
       // 找不到上次提问（消息被编辑等）则用全量（重复但正确）
     } else {
@@ -2125,15 +1884,17 @@ async function handleDshModelRequest(messages, options, progress, token) {
       const created = await dshRpc(base, 'session.create', createPayload, 20000);
       sid = created.sessionId;
       isNewSession = true;
-      entry = { dshSessionId: sid, workspacePath, lastUserText: '' };
+      entry = { dshSessionId: sid, workspacePath, lastUserText: '', selection: '', pending: false, completed: false, lastUsedAt: Date.now() };
       map[chatKey] = entry;
-      if (provider && model) {
-        try {
-          await dshRpc(base, 'session.selectModel', { sessionId: sid, provider, model }, 20000);
-        } catch (_) { /* 选择失败则用 DSH 默认模型 */ }
+      if (selectionKey) {
+        await selectModelForSession(base, sid, provider, chatModel, effort);
+        entry.selection = selectionKey;
       }
     }
     entry.lastUserText = currentPrompt;
+    entry.pending = true;
+    entry.completed = false;
+    entry.lastUsedAt = Date.now();
     await gContext.globalState.update(DSH_MODEL_MAP_KEY, map);
     if (!taskText.trim()) taskText = '用户：' + currentPrompt;
     // 先取事件游标（必须在提交任务之前，避免把 turn/start 一并吃掉导致流式判定失效）
@@ -2155,11 +1916,13 @@ async function handleDshModelRequest(messages, options, progress, token) {
       mode: 'queue',
       content: [{ type: 'text', text: taskText }]
     }, 30000);
-    progress.report(makeTextPart('⏳ 已提交给 DeepSeek Harness' + (provider && model ? '（' + provider + '/' + model + '）' : '（默认模型）') + (isNewSession ? '（新会话）' : '（续聊）') + '，正在执行…\n\n'));
+    progress.report(makeTextPart('⏳ 已提交给 DeepSeek Harness（' + displayModel + (effort ? ' · 档位 ' + effort : '') + '）' + (isNewSession ? '（新会话）' : '（续聊）') + '，正在执行…\n\n'));
     console.log('[DeepSeek Harness] dsh 模型请求已提交，session=' + sid);
 
     while (Date.now() < deadline) {
       if (token.isCancellationRequested) {
+        entry.pending = false;
+        try { await gContext.globalState.update(DSH_MODEL_MAP_KEY, map); } catch (_) {}
         progress.report(makeTextPart('\n\n> ⏹ 已停止等待。任务仍在 DSH 中运行，可到 DSH 面板查看。'));
         return;
       }
@@ -2167,6 +1930,8 @@ async function handleDshModelRequest(messages, options, progress, token) {
       try {
         hist = await dshRpc(base, 'session.history', { sessionId: sid }, 15000);
       } catch (e) {
+        entry.pending = false;
+        try { await gContext.globalState.update(DSH_MODEL_MAP_KEY, map); } catch (_) {}
         progress.report(makeTextPart('\n\n> ⚠️ 读取 DSH 任务状态失败：' + e.message + '（任务可能仍在运行，可到 DSH 面板查看）'));
         return;
       }
@@ -2191,14 +1956,51 @@ async function handleDshModelRequest(messages, options, progress, token) {
             progress.report(makeTextPart('\n\n> ⚠️ DSH 任务未正常完成（' + errDesc + '）。可到 DSH 面板查看。'));
           }
           console.log('[DeepSeek Harness] dsh 模型请求完成');
+          entry.pending = false;
+          entry.completed = true;
+          try { await gContext.globalState.update(DSH_MODEL_MAP_KEY, map); } catch (_) {}
           return;
         }
       }
       await sleep(1000);
     }
+    entry.pending = false;
+    try { await gContext.globalState.update(DSH_MODEL_MAP_KEY, map); } catch (_) {}
     progress.report(makeTextPart('\n\n> ⏱ 超过等待上限（' + Math.round(timeoutMs / 60000) + ' 分钟）仍未完成。任务仍在 DSH 面板运行。'));
   } catch (e) {
     progress.report(makeTextPart('❌ DSH 模型执行出错：' + (e && e.message ? e.message : String(e))));
+  }
+}
+
+/**
+ * 解析 DSH 模型条目 → DeepSeek 官方固定选择；'dsh' 条目返回 null（跟随 VS Code 配置）。
+ * @param {string} modelId
+ * @returns {{provider: string, model: string} | null}
+ */
+function resolveDshModelSelection(modelId) {
+  if (modelId === 'dsh-deepseek-v4-pro') return { provider: 'deepseek-official', model: 'deepseek-v4-pro' };
+  if (modelId === 'dsh-deepseek-v4-flash') return { provider: 'deepseek-official', model: 'deepseek-v4-flash' };
+  if (modelId === 'dsh-deepseek-v4-flash-vision-exp') return { provider: 'deepseek-official', model: 'deepseek-v4-flash-vision-exp' };
+  return null;
+}
+
+/**
+ * 为 DSH 会话选择模型（含可选推理档位）；失败静默回退 DSH 默认。
+ * @param {string} base
+ * @param {string} sid
+ * @param {string} provider
+ * @param {string} chatModel
+ * @param {string} effort
+ * @returns {Promise<boolean>}
+ */
+async function selectModelForSession(base, sid, provider, chatModel, effort) {
+  const payload = { sessionId: sid, provider, model: chatModel };
+  if (effort) payload.reasoningEffort = effort;
+  try {
+    await dshRpc(base, 'session.selectModel', payload, 20000);
+    return true;
+  } catch (_) {
+    return false; // 选择失败则用 DSH 默认模型/档位
   }
 }
 
@@ -2213,23 +2015,72 @@ function registerDshModelProvider(context) {
   }
   if (!cfg().get('dshPanel.enableDshModel', true)) return;
   try {
+    // 关键（借鉴 vizards.deepseek-v4-for-copilot）：提供 onDidChangeLanguageModelChatInformation
+    // 事件，并在注册后触发一次——VS Code 会缓存模型信息，若不触发变更事件，
+    // 缓存里可能是不含 configurationSchema 的旧数据，导致「推理档位」UI 不渲染。
+    const dshModelEmitter = new vscode.EventEmitter();
+    // 与 vizards.deepseek-v4-for-copilot 对齐：VS Code 核心依据 provider 返回的
+    // languageModelChatInformation 顶级字段渲染「推理档位」配置 pill。成本用合法货币串
+    // （避免 '—' 这类非法值），reasoningEffort 属性带 group:'navigation'。
+    const dshModelDefs = [
+      { id: 'dsh', name: 'DSH (DeepSeek Harness)', detail: '默认：跟随 DSH 设置模型 · 档位可配',
+        cost: { inputCost: '$0.14', outputCost: '$0.28', cacheCost: '$0.0028' } },
+      { id: 'dsh-deepseek-v4-pro', name: 'DeepSeek-V4-Pro (DSH)', detail: 'DeepSeek 官方 · 档位 off/low/high/max',
+        cost: { inputCost: '$0.435', outputCost: '$0.87', cacheCost: '$0.003625' } },
+      { id: 'dsh-deepseek-v4-flash', name: 'DeepSeek-V4-Flash (DSH)', detail: 'DeepSeek 官方 · 档位 off/low/high/max',
+        cost: { inputCost: '$0.14', outputCost: '$0.28', cacheCost: '$0.0028' } },
+      { id: 'dsh-deepseek-v4-flash-vision-exp', name: 'deepseek-v4-flash-vision-exp (DSH)', detail: 'DeepSeek 官方视觉模型 · 档位 off/low/high/max',
+        cost: { inputCost: '$0.14', outputCost: '$0.28', cacheCost: '$0.0028' } }
+    ];
+    const dshReasoningEffortSchema = {
+      type: 'string',
+      title: '推理档位',
+      default: 'high',
+      enum: ['none', 'low', 'high', 'max'],
+      enumItemLabels: ['关闭（off）', '低', '高', '最高'],
+      enumDescriptions: [
+        '关闭推理（对应 DSH 档位 off）',
+        '低档推理',
+        '高档推理（DSH 默认档位）',
+        '最高档推理'
+      ],
+      group: 'navigation'
+    };
     const provider = {
+      onDidChangeLanguageModelChatInformation: dshModelEmitter.event,
       provideLanguageModelChatInformation(_options, _token) {
-        return [{
-          id: 'dsh',
-          name: 'DSH (DeepSeek Harness)',
+        const info = dshModelDefs.map((m) => ({
+          id: m.id,
+          name: m.name,
           family: 'dsh',
-          version: '0.7.0',
-          detail: '由 DeepSeek Harness 在工作区执行工具后解答',
+          version: '0.8.9',
+          detail: m.detail,
+          tooltip: 'DeepSeek Harness：在工作区解析任务、执行工具后解答；模型与推理档位可配置',
           maxInputTokens: 250000,
           maxOutputTokens: 128000,
+          // 门控字段（对齐 vizards：isBYOK/isUserSelectable 让模型可被选、可配置）
+          isBYOK: true,
+          isUserSelectable: true,
           // toolCalling 声明为 true：Agent 模式的模型选择器只列出支持工具的模型。
           // DSH 用自己的工具执行，VS Code 传入的工具（options.tools）一律忽略、不返回工具调用，无冲突。
-          capabilities: { toolCalling: true, imageInput: false }
-        }];
+          capabilities: { toolCalling: true, imageInput: false },
+          // 成本信息（对齐 vizards toModelCostInfo 字段，用合法货币串以免核心解析异常）
+          priceCategory: 'low',
+          ...m.cost,
+          // 模型配置 schema：让 VS Code 在模型选择器里显示「推理档位」下拉，
+          // 用户选中值经 options.modelConfiguration.reasoningEffort 传回 provider。
+          configurationSchema: { properties: { reasoningEffort: dshReasoningEffortSchema } }
+        }));
+        // 落盘实际返回的 provider info，便于确认 configurationSchema 是否传给 VS Code。
+        try {
+          const dbgDir = path.join(os.homedir(), '.dsh-debug');
+          fs.mkdirSync(dbgDir, { recursive: true });
+          fs.writeFileSync(path.join(dbgDir, 'provider-info.json'), JSON.stringify({ ts: Date.now(), models: info }, null, 2), 'utf8');
+        } catch (_) { /* 忽略 */ }
+        return info;
       },
-      provideLanguageModelChatResponse(_model, messages, options, progress, token) {
-        return handleDshModelRequest(messages, options, progress, token);
+      provideLanguageModelChatResponse(model, messages, options, progress, token) {
+        return handleDshModelRequest(model, messages, options, progress, token);
       },
       provideTokenCount(_model, text, _token) {
         const s = typeof text === 'string' ? text : (text && text.value ? text.value : '');
@@ -2237,79 +2088,95 @@ function registerDshModelProvider(context) {
       }
     };
     context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider('dsh', provider));
+    // ① 激活 Copilot Chat（若已安装），确保模型信息的实时监听器存在；
+    // ② 多次触发变更事件 + 主动 selectChatModels 强制重查，覆盖核心/聊天扩展的模型缓存。
+    try {
+      const copilotChat = vscode.extensions.getExtension('github.copilot-chat');
+      if (copilotChat) {
+        copilotChat.activate().then(() => {
+          setTimeout(() => { try { dshModelEmitter.fire(); } catch (_) { /* 已释放则忽略 */ } }, 50);
+        }).catch(() => { /* 无监听器则忽略 */ });
+      }
+    } catch (_) { /* 未安装或无监听器则忽略 */ }
+    [300, 1200, 3000, 6000].forEach((ms) => {
+      setTimeout(() => { try { dshModelEmitter.fire(); } catch (_) { /* 已释放则忽略 */ } }, ms);
+    });
+    setTimeout(() => { try { vscode.lm.selectChatModels({ vendor: 'dsh' }).catch(() => {}); } catch (_) { /* 忽略 */ } }, 700);
+    context.subscriptions.push(dshModelEmitter);
     dshModelProviderRegistered = true;
-    console.log('[DeepSeek Harness] dsh 语言模型提供方已注册（模型选择器可见）');
+    console.log('[DeepSeek Harness] dsh 语言模型提供方已注册（模型选择器可见），已触发模型信息刷新');
   } catch (e) {
     console.error('[DeepSeek Harness] 注册 dsh 语言模型提供方失败：', e);
   }
 }
 
 /**
- * 注册 /dsh ChatParticipant（VS Code 1.94+，需已安装 GitHub Copilot Chat）。
- * @param {import('vscode').ExtensionContext} context
+ * 诊断：列出 VS Code 语言模型注册表里的模型及其 metadata（含 configurationSchema 是否存在），
+ * 与 vizards（vendor=deepseek）对比，用于定位「推理档位」UI 不渲染的原因。
  */
-function registerChatParticipant(context) {
-  if (!vscode.chat || typeof vscode.chat.createChatParticipant !== 'function') {
-    console.warn('[DeepSeek Harness] vscode.chat.createChatParticipant 不可用（未安装 Copilot Chat 或 VS Code 版本过低），/dsh 未注册。可用「DeepSeek Harness: 检查 /dsh 状态」查看详情。');
-    return;
-  }
+async function diagnoseModels() {
+  // 固定输出到用户主目录（不依赖当前工作区，保证一定可找到）
+  const debugDir = path.join(os.homedir(), '.dsh-debug');
   try {
-    const participant = vscode.chat.createChatParticipant('dsh', dshChatHandler);
-    try {
-      participant.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'icon.svg');
-    } catch (_) { /* icon 可选 */ }
-    participant.description = 'DSH：由 DeepSeek Harness 在工作区分析数据、执行工具后解答';
-    try { participant.isSticky = true; } catch (_) { /* 新版本可选字段 */ }
-    context.subscriptions.push(participant);
-    chatParticipantRegistered = true;
-    console.log('[DeepSeek Harness] /dsh ChatParticipant 已注册');
+    fs.mkdirSync(debugDir, { recursive: true });
+    const all = await vscode.lm.selectChatModels();
+    const vendors = {};
+    for (const m of all || []) {
+      const obj = m;
+      const vendor = String(obj.vendor || '?');
+      vendors[vendor] = vendors[vendor] || [];
+      const meta = obj.metadata !== undefined ? obj.metadata : null;
+      vendors[vendor].push({
+        id: obj.id,
+        name: obj.name,
+        family: obj.family,
+        version: obj.version,
+        maxInputTokens: obj.maxInputTokens,
+        maxOutputTokens: obj.maxOutputTokens,
+        priceCategory: obj.priceCategory,
+        category: obj.category,
+        inputCost: obj.inputCost,
+        outputCost: obj.outputCost,
+        cacheCost: obj.cacheCost,
+        capabilities: obj.capabilities,
+        isUserSelectable: obj.isUserSelectable,
+        isBYOK: obj.isBYOK,
+        hasConfigSchema: !!(meta && meta.configurationSchema),
+        metaKeys: meta ? Object.keys(meta) : [],
+        metaPreview: meta ? JSON.stringify(meta).slice(0, 500) : null,
+        objKeys: Object.keys(obj)
+      });
+    }
+    const file = path.join(debugDir, 'models-diagnose.json');
+    fs.writeFileSync(file, JSON.stringify({ ts: Date.now(), vendors }, null, 2), 'utf8');
+    vscode.window.showInformationMessage('模型注册表诊断已写入：' + file);
   } catch (e) {
-    console.error('[DeepSeek Harness] 注册 /dsh ChatParticipant 失败：', e);
+    vscode.window.showErrorMessage('诊断失败：' + (e && e.message ? e.message : String(e)));
   }
 }
 
 /**
- * 「检查 /dsh 状态」诊断命令：报告 chat API 可用性、参与者注册情况、DSH 连通性与当前模型配置。
+ * 「DSH 状态」诊断命令：报告模型提供方注册情况、DSH 连通性与当前模型配置。
  */
 async function showChatStatus() {
-  const hasChat = !!(vscode.chat && typeof vscode.chat.createChatParticipant === 'function');
   const reachable = await checkUrl(getUrl());
   const provider = cfg().get('dshPanel.chatProvider', '');
   const model = cfg().get('dshPanel.chatModel', '');
+  const effort = cfg().get('dshPanel.dshReasoningEffort', '');
   const lines = [
-    'DeepSeek Harness /dsh 状态',
-    'chat API 可用: ' + (hasChat ? '是' : '否'),
-    '/dsh 参与者已注册: ' + (chatParticipantRegistered ? '是' : '否'),
+    'DeepSeek Harness DSH 状态',
     'DSH 服务可达: ' + (reachable ? '是 (' + getUrl() + ')' : '否'),
+    'dsh 语言模型提供方: ' + (dshModelProviderRegistered ? '已注册（模型选择器可见）' : '未注册'),
     '模型配置: provider=' + (provider || '(跟随 DSH 默认)') + ' / model=' + (model || '(跟随 DSH 默认)'),
-    '已映射聊天数: ' + Object.keys(gContext.globalState.get(CHAT_MAP_KEY) || {}).length,
-    '对话同步来源: ' + (cfg().get('dshPanel.chatSyncSource', 'disk') === 'proxy' ? '代理' : '磁盘直读'),
-    '对话同步开关: ' + (cfg().get('dshPanel.chatSyncInterim', true) ? '开启' : '关闭'),
-    'dsh 语言模型提供方: ' + (dshModelProviderRegistered ? '已注册（模型选择器可见）' : '未注册')
+    '推理档位: ' + (effort || '(跟随 DSH 默认)'),
+    '已映射聊天数: ' + Object.keys(gContext.globalState.get(DSH_MODEL_MAP_KEY) || {}).length
   ];
-  if (!hasChat) {
-    lines.push('');
-    lines.push('提示: 当前环境没有可用的 Chat API，/dsh 无法注册。');
-    lines.push('请确认安装了官方 GitHub Copilot Chat，或使用 VS Code 内置 Chat 视图的兼容 provider。');
-  } else if (!chatParticipantRegistered) {
-    lines.push('');
-    lines.push('提示: chat API 可用但注册失败，请查看 Output → Extension Host 日志。');
-  } else {
-    lines.push('');
-    lines.push('正常: 在 Chat 面板 (Ctrl+Alt+I) 输入 /dsh 即可调用。');
-  }
   vscode.window.showInformationMessage(lines.join('\n'), { modal: false });
 }
 
 function activate(context) {
   gContext = context;
-  registerChatParticipant(context);
   registerDshModelProvider(context);
-
-  // 启动本地 Copilot 消息代理（后台静默）：保证指向代理的 DeepSeek 模型随时可用。
-  if (cfg().get('dshPanel.chatProxyAutoStart', true)) {
-    ensureProxyRunning().catch(() => {});
-  }
 
   const provider = {
     resolveWebviewView(view) {
@@ -2514,28 +2381,22 @@ function activate(context) {
     }
   });
 
-  const stopProxyCmd = vscode.commands.registerCommand('dshPanel.stopProxy', async () => {
-    try {
-      await httpPostJson(getProxyUrl() + '/__dsh/shutdown', {}, 5000);
-      vscode.window.showInformationMessage('已停止 Copilot 消息代理。注意：停止后 Copilot 中指向代理的 DeepSeek 模型将无法使用；再次使用 @dsh 会自动重启。');
-    } catch (e) {
-      vscode.window.showWarningMessage('停止代理失败：' + (e && e.message ? e.message : String(e)) + '（可能未在运行）');
-    }
+  const diagnoseModelsCmd = vscode.commands.registerCommand('dshPanel.diagnoseModels', () => {
+    diagnoseModels().catch((e) => vscode.window.showErrorMessage('诊断失败：' + (e && e.message ? e.message : String(e))));
   });
 
   const chatStatusCmd = vscode.commands.registerCommand('dshPanel.chatStatus', () => {
-    showChatStatus().catch((e) => vscode.window.showErrorMessage('检查 /dsh 状态失败：' + (e && e.message ? e.message : String(e))));
+    showChatStatus().catch((e) => vscode.window.showErrorMessage('检查 DSH 状态失败：' + (e && e.message ? e.message : String(e))));
   });
 
   const resetChatCmd = vscode.commands.registerCommand('dshPanel.resetChatMapping', async () => {
     if (gContext) {
-      await gContext.globalState.update(CHAT_MAP_KEY, {});
       await gContext.globalState.update(DSH_MODEL_MAP_KEY, {});
     }
-    vscode.window.showInformationMessage('已重置 /dsh 与 DSH 模型的会话映射：下次提问将创建新的 DSH 会话。');
+    vscode.window.showInformationMessage('已重置 DSH 会话映射：下次提问将创建新的 DSH 会话。');
   });
 
-  context.subscriptions.push(viewSub, openInTabCmd, refreshCmd, openBrowserCmd, restartCmd, wsSub, sendSelectionCmd, chatStatusCmd, stopProxyCmd, resetChatCmd);
+  context.subscriptions.push(viewSub, openInTabCmd, refreshCmd, openBrowserCmd, restartCmd, wsSub, sendSelectionCmd, chatStatusCmd, diagnoseModelsCmd, resetChatCmd);
 }
 
 function deactivate() {
