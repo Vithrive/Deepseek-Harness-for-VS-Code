@@ -1,8 +1,8 @@
 {
   "name": "deepseek-harness-vscode",
   "displayName": "DeepSeek Harness for VSCode",
-  "description": "DeepSeek Harness (DSH) 的 VS Code 接入：侧边栏/标签页忠实呈现 DSH Web GUI 并自动检测启动；v0.7.13 起把 DSH 注册为 Copilot 聊天模型「DSH (DeepSeek Harness)」——吃 Copilot 组织好的现成对话、滤除杂音、交给 DSH 二次组织、流式回写，让 DeepSeek 发挥最大性能",
-  "version": "0.7.15",
+  "description": "DeepSeek Harness (DSH) 的 VS Code 接入：侧边栏/标签页忠实呈现 DSH Web GUI 并自动检测启动，不影响用户对 DSH 本身的页面组织、第三方插件装配等二次开发行为；v0.7.13 起把 DSH 注册为 Copilot 聊天模型「DSH (DeepSeek Harness)、DeepSeek-V4-Pro (DSH)、DeepSeek-V4-Flash (DSH)……」——接收 Copilot 组织好的现成对话、滤除对话内容无关的 prompt、交给 DSH 二次组织、流式回写，旨在利用 DSH 强大的任务编排与工具调用能力，让 DeepSeek 系列模型发挥最大性能",
+  "version": "0.8.26",
   "publisher": "vithrive",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -22,7 +22,6 @@
   ],
   "activationEvents": [
     "onView:dsh.webview",
-    "onChatParticipant:dsh",
     "onCommand:dshPanel.resetChatMapping",
     "onCommand:dshPanel.chatStatus",
     "onStartupFinished"
@@ -80,48 +79,27 @@
         "dshPanel.chatAgentPreset": {
           "type": "string",
           "default": "",
-          "description": "@dsh ChatParticipant 创建 DSH 会话时使用的 agent 预设（如 liangshen）；留空=DSH 设置里的默认预设"
+          "description": "DSH 模型会话创建时使用的 agent 预设（如 liangshen）；留空=DSH 设置里的默认预设"
         },
         "dshPanel.chatProvider": {
           "type": "string",
           "default": "",
-          "description": "@dsh ChatParticipant 使用的模型提供方（provider id，需已在 DSH 设置中配置）；留空=跟随 DSH 默认模型"
+          "description": "DSH (DeepSeek Harness) 模型条目使用的模型提供方（provider id，需已在 DSH 设置中配置，如 deepseek-official）；留空=跟随 DSH 默认模型"
         },
         "dshPanel.chatModel": {
           "type": "string",
           "default": "",
-          "description": "@dsh ChatParticipant 使用的模型 id（与 chatProvider 配合，如 deepseek-v4-pro）；留空=跟随 DSH 默认模型"
+          "description": "DSH (DeepSeek Harness) 模型条目使用的模型 id（与 chatProvider 配合，如 deepseek-v4-pro）；留空=跟随 DSH 默认模型"
         },
         "dshPanel.chatTimeoutMs": {
           "type": "number",
           "default": 900000,
           "description": "单次任务最长等待时间（毫秒），超时后任务仍在 DSH 面板运行"
         },
-        "dshPanel.chatProxyUrl": {
-          "type": "string",
-          "default": "http://127.0.0.1:3050",
-          "description": "Copilot 消息截获代理的地址（用于让 @dsh 读取 Copilot 发往自定义模型的完整消息列表）"
-        },
-        "dshPanel.chatProxyUpstream": {
-          "type": "string",
-          "default": "https://api.deepseek.com",
-          "description": "代理转发到的上游地址（默认 DeepSeek 官方 API）"
-        },
-        "dshPanel.chatProxyAutoStart": {
-          "type": "boolean",
-          "default": false,
-          "description": "代理未运行时是否自动启动扩展自带的 dsh-copilot-proxy.js（仅 chatSyncSource=proxy 时使用）"
-        },
-        "dshPanel.chatSyncSource": {
-          "type": "string",
-          "default": "disk",
-          "enum": ["disk", "proxy"],
-          "description": "Copilot 对话同步来源：disk=磁盘直读 chatSessions .jsonl（默认，零侵入、卸载无残留）；proxy=本地代理截获（需改模型 url 指向代理）"
-        },
         "dshPanel.chatSyncLookbackMin": {
           "type": "number",
           "default": 60,
-          "description": "磁盘直读扫描最近多少分钟内修改过的会话文件"
+          "description": "定位当前 Copilot 聊天时，扫描最近多少分钟内修改过的聊天会话文件"
         },
         "dshPanel.enableDshModel": {
           "type": "boolean",
@@ -133,15 +111,11 @@
           "default": false,
           "description": "调试：把 VS Code 发给 DSH 模型的消息结构写入工作区 .dsh-debug/ 目录"
         },
-        "dshPanel.chatSyncInterim": {
-          "type": "boolean",
-          "default": true,
-          "description": "@dsh 是否自动同步 Copilot 侧中间对话（上次 @dsh 之后切换到其它模型产生的问答）"
-        },
-        "dshPanel.chatSyncMaxChars": {
-          "type": "number",
-          "default": 500000,
-          "description": "每次同步对话的最大字符数（软上限：超限先压缩，绝不截断，保证完整消息）"
+        "dshPanel.dshReasoningEffort": {
+          "type": "string",
+          "default": "",
+          "enum": ["", "off", "low", "high", "max"],
+          "description": "DSH 模型的推理档位兜底配置（reasoningEffort）：off/low/high/max；聊天界面选择优先，此配置仅在界面未选择时生效；留空=跟随 DSH 默认档位"
         }
       }
     },
@@ -163,15 +137,6 @@
         }
       ]
     },
-    "chatParticipants": [
-      {
-        "id": "dsh",
-        "name": "dsh",
-        "fullName": "DSH (DeepSeek Harness)",
-        "description": "由 DeepSeek Harness 在工作区分析数据、执行工具后解答",
-        "isSticky": true
-      }
-    ],
     "commands": [
       {
         "command": "dshPanel.openInTab",
@@ -206,8 +171,8 @@
         "title": "DeepSeek Harness: 检查 DSH 状态"
       },
       {
-        "command": "dshPanel.stopProxy",
-        "title": "DeepSeek Harness: 停止 Copilot 消息代理"
+        "command": "dshPanel.diagnoseModels",
+        "title": "DeepSeek Harness: 诊断 DSH 模型注册表"
       }
     ],
     "menus": {
