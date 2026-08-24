@@ -1429,40 +1429,54 @@ function stripJunkPrefix(t) {
 }
 
 /**
- * 剥离 VS Code 消息里的 <attachment>…</attachment> 块并提取文件路径。
- * 路径来源（按优先级）：开标签 filePath 属性 → 正文体首行 "// filepath: <路径>" 注释 →
- * path/uri 属性（file:// URI 归一化为本地路径）。
- * 只保留路径、丢弃文件内容——DSH 用自己的工具读取文件，省 token。
- * @param {string} t
- * @returns {{cleaned: string, paths: string[]}}
+ * 解析一条「附件消息」（VS Code 把拖进聊天框的文件作为独立的 user 消息投递，
+ * 整条消息形如 <attachment id="...">…文件内容…</attachment>）并提取文件路径。
+ * 路径来源（按优先级）：
+ *  1) 正文 filepath 注释（三种实测变体：<!-- filepath: p --> / // filepath: p / # filepath: p）；
+ *  2) 开标签 filePath/path/uri 属性（file:// URI 归一化为本地路径）；
+ *  3) id 属性（"file:NAME" 或 "NAME"，仅文件名——拼接当前工作区路径，找不到就原样传）。
+ * 注意不能用「<attachment …>…</attachment>」内部配对正则剥离：文件内容里可能有
+ * 字面 <attachment> 文本（比如拖进本扩展的源码），配对会被内容里的字面量击穿。
+ * @param {string} t 整条消息文本
+ * @returns {string[]}
  */
-function extractAndStripAttachments(t) {
+function attachmentMessagePaths(t) {
+  const s = String(t || '').trim();
+  if (!/^<attachment\b/i.test(s)) return [];
   const paths = [];
-  const cleaned = String(t || '').replace(
-    /<attachment\b([^>]*)>([\s\S]*?)<\/attachment>/gi,
-    (_full, attrs, body) => {
-      let p = '';
-      const am = String(attrs).match(/\bfilePath\s*=\s*"([^"]+)"/i);
-      if (am) p = am[1].trim();
-      if (!p) {
-        const bm = String(body).match(/^\s*\/\/\s*filepath:\s*(.+)$/im);
-        if (bm) p = bm[1].trim();
+  const push = (p) => { if (p && !paths.includes(p)) paths.push(p); };
+  // 1) filepath 注释（HTML 注释 / 双斜杠 / 井号 三种变体，正则从宽）
+  let m = s.match(/<!--\s*filepath:\s*([^>\r\n]+?)\s*-->/i);
+  if (!m) m = s.match(/(?:^|\n)\s*(?:\/\/|#)\s*filepath:\s*(.+?)(?:\r?\n|$)/i);
+  if (m) push(m[1].trim());
+  // 2) filePath / path / uri 属性
+  if (!paths.length) {
+    const am = s.match(/<attachment\b[^>]*\bfilePath\s*=\s*"([^"]+)"/i)
+      || s.match(/<attachment\b[^>]*\b(?:path|uri)\s*=\s*"([^"]+)"/i);
+    if (am) {
+      let p = am[1].trim();
+      if (/^file:\/\//i.test(p)) {
+        try { p = decodeURIComponent(new URL(p).pathname); } catch (_) { /* 保持原样 */ }
+        if (process.platform === 'win32' && /^\/[A-Za-z]:/.test(p)) p = p.slice(1);
       }
-      if (!p) {
-        const am2 = String(attrs).match(/\b(?:path|uri)\s*=\s*"([^"]+)"/i);
-        if (am2) {
-          p = am2[1].trim();
-          if (/^file:\/\//i.test(p)) {
-            try { p = decodeURIComponent(new URL(p).pathname); } catch (_) { /* 保持原样 */ }
-            if (process.platform === 'win32' && /^\/[A-Za-z]:/.test(p)) p = p.slice(1);
-          }
-        }
-      }
-      if (p && !paths.includes(p)) paths.push(p);
-      return '';
+      push(p);
     }
-  );
-  return { cleaned, paths };
+  }
+  // 3) id 属性兜底（file:NAME 或 NAME）
+  if (!paths.length) {
+    const im = s.match(/<attachment\b[^>]*\bid\s*=\s*"([^"]+)"/i);
+    if (im) {
+      let name = im[1].trim();
+      name = name.replace(/^file:/i, '').replace(/^active editor:/i, '').trim();
+      if (name && !/^[A-Za-z]:[\\/]/.test(name) && !/^[\\/]/.test(name)) {
+        // 仅为文件名：拼接工作区目录（找不到也能给 DSH 一个可搜的线索）
+        const ws = getWorkspaceDir();
+        if (ws) name = path.join(ws, name);
+      }
+      push(name);
+    }
+  }
+  return paths;
 }
 
 /**
@@ -1501,18 +1515,21 @@ function lmMessageText(m) {
   if (isUser) {
     // 环境/工作区快照消息：整条丢弃（DSH 有实时文件访问，静态快照无用；尾注也是 VS Code 元信息）
     if (/^\s*<(environment_info|workspace_info)>/.test(text)) return '';
-    // 文件引用处理（先剔除 <instructions> 块，避免把指令文件当作用户引用）：
-    // VS Code 把拖进聊天框的文件/文件夹以 <attachment> 块内联在消息里（含完整文件内容），
-    // 这里整块剥离、只取真实路径随提问透传给 DSH（DSH 用自己的工具读取，不浪费 token）。
-    const noInstr = text.replace(/<instructions>[\s\S]*?<\/instructions>/gi, '');
-    const { cleaned: noAttach, paths: attachPaths } = extractAndStripAttachments(noInstr);
-    const attachSuffix = attachPaths.length ? ('\n\n【文件引用】\n' + attachPaths.map((p) => '- ' + p).join('\n')) : '';
-    if (!noAttach.trim()) {
-      // 整条消息只有附件：输出引用块（不带「用户：」前缀，身份键会自动跳过，
-      // 引用块与其后真正的问题消息一起序列化发给 DSH）
-      return attachPaths.length ? ('【文件引用】\n' + attachPaths.map((p) => '- ' + p).join('\n')) : '';
+    // 文件引用处理：VS Code 把拖进聊天框的文件/文件夹作为**独立的 user 消息**投递
+    //（整条形如 <attachment id="...">…文件内容…</attachment>）。这里按整条消息解析：
+    // 提取真实路径、丢弃文件内容（DSH 用自己的工具读取，不浪费 token）。
+    if (/^\s*<attachment\b/i.test(text)) {
+      const paths = attachmentMessagePaths(text);
+      return paths.length ? ('【文件引用】\n' + paths.map((p) => '- ' + p).join('\n')) : '';
     }
-    text = noAttach; // 后续解析都基于剥离附件后的文本，文件内容绝不透传
+    let attachPaths = [];
+    // 兼容：附件与提问混在同一条消息里时（极少见），剥离 instructions 后再按整条解析
+    const noInstr0 = text.replace(/<instructions>[\s\S]*?<\/instructions>/gi, '').trim();
+    if (/^\s*<attachment\b/i.test(noInstr0)) {
+      attachPaths = attachmentMessagePaths(noInstr0);
+      text = noInstr0.replace(/[\s\S]*/, '').trim(); // 附件独占 → 文本清空
+    }
+    const attachSuffix = attachPaths.length ? ('\n\n【文件引用】\n' + attachPaths.map((p) => '- ' + p).join('\n')) : '';
     // 保留 Copilot 独有记忆（userMemory/sessionMemory/repoMemory 的正文，去掉 XML 包装）
     const memText = extractMemoryBlocks(text);
     if (memText) {
@@ -1556,6 +1573,12 @@ function lmMessageText(m) {
         text = '';
       }
     }
+  }
+  // 助手消息里的 VS Code 注入块（<system-reminder> 等）：剥离前缀只留回答正文，
+  // 避免 system 提示词作为「已答内容」重复回传给 DSH
+  {
+    const sm = text.match(/<system-reminder>[\s\S]*?<\/system-reminder>\s*/i);
+    if (sm) text = text.replace(sm[0], '');
   }
   if (!text.trim()) return '';
   return '助手：' + text;
@@ -1908,14 +1931,21 @@ async function handleDshModelRequest(model, messages, options, progress, token) 
         }
       }
     }
-    // 当前对话出现过的全部【文件引用】块签名：引用变化说明带来了新文件，
+    // 当前提问（最后一条用户消息）的附件签名：引用变化说明带来了新文件，
     // 不属于「同一提问的重复投递」，必须放行发送（否则新拖的文件永远发不出去）。
+    // 只取最后一条用户消息——裸提问/带上下文两次投递的 history 序列化可能不同，
+    // 全对话拼接会误伤去重（此前 v0.8.30 的教训）。
     let currentAttachSig = '';
-    for (const mm of messages || []) {
+    for (let i = (messages || []).length - 1; i >= 0; i--) {
+      const mm = messages[i];
+      const r2 = mm && mm.role;
+      if (r2 !== 1 && r2 !== 'user' && r2 !== 'User') continue;
       const s = lmMessageText(mm);
-      if (!s) continue;
-      const ai = s.indexOf('【文件引用】');
-      if (ai >= 0) currentAttachSig += (currentAttachSig ? '||' : '') + s.slice(ai);
+      if (s) {
+        const ai = s.indexOf('【文件引用】');
+        if (ai >= 0) currentAttachSig = s.slice(ai);
+        break;
+      }
     }
     // 去重：VS Code 会把同一次提问投递两次（「裸提问」+「instructions+<prompt>提问」），
     // 归一化后 currentPrompt 相同且附件签名一致；此时若该会话已有进行中/已完成的同题
