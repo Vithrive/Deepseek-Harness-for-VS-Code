@@ -1429,29 +1429,40 @@ function stripJunkPrefix(t) {
 }
 
 /**
- * 提取 VS Code 消息里附带的文件引用路径（<attachment filePath="..."> / <file path|uri="...">）。
- * 只传路径、不内联内容——DSH 用自己的工具读取文件，省 token。
+ * 剥离 VS Code 消息里的 <attachment>…</attachment> 块并提取文件路径。
+ * 路径来源（按优先级）：开标签 filePath 属性 → 正文体首行 "// filepath: <路径>" 注释 →
+ * path/uri 属性（file:// URI 归一化为本地路径）。
+ * 只保留路径、丢弃文件内容——DSH 用自己的工具读取文件，省 token。
  * @param {string} t
- * @returns {string[]}
+ * @returns {{cleaned: string, paths: string[]}}
  */
-function extractAttachmentPaths(t) {
-  const out = [];
-  const re = /<attachment\b[^>]*\bfilePath\s*=\s*"([^"]+)"/gi;
-  let m;
-  while ((m = re.exec(String(t || '')))) {
-    const p = m[1].trim();
-    if (p && !out.includes(p)) out.push(p);
-  }
-  const re2 = /<(?:file|attachment)\b[^>]*\b(?:path|uri)\s*=\s*"([^"]+)"/gi;
-  while ((m = re2.exec(String(t || '')))) {
-    let p = m[1].trim();
-    if (/^file:\/\//i.test(p)) {
-      try { p = decodeURIComponent(new URL(p).pathname); } catch (_) { /* 保持原样 */ }
-      if (process.platform === 'win32' && /^\/[A-Za-z]:/.test(p)) p = p.slice(1);
+function extractAndStripAttachments(t) {
+  const paths = [];
+  const cleaned = String(t || '').replace(
+    /<attachment\b([^>]*)>([\s\S]*?)<\/attachment>/gi,
+    (_full, attrs, body) => {
+      let p = '';
+      const am = String(attrs).match(/\bfilePath\s*=\s*"([^"]+)"/i);
+      if (am) p = am[1].trim();
+      if (!p) {
+        const bm = String(body).match(/^\s*\/\/\s*filepath:\s*(.+)$/im);
+        if (bm) p = bm[1].trim();
+      }
+      if (!p) {
+        const am2 = String(attrs).match(/\b(?:path|uri)\s*=\s*"([^"]+)"/i);
+        if (am2) {
+          p = am2[1].trim();
+          if (/^file:\/\//i.test(p)) {
+            try { p = decodeURIComponent(new URL(p).pathname); } catch (_) { /* 保持原样 */ }
+            if (process.platform === 'win32' && /^\/[A-Za-z]:/.test(p)) p = p.slice(1);
+          }
+        }
+      }
+      if (p && !paths.includes(p)) paths.push(p);
+      return '';
     }
-    if (p && !out.includes(p)) out.push(p);
-  }
-  return out;
+  );
+  return { cleaned, paths };
 }
 
 /**
@@ -1490,12 +1501,18 @@ function lmMessageText(m) {
   if (isUser) {
     // 环境/工作区快照消息：整条丢弃（DSH 有实时文件访问，静态快照无用；尾注也是 VS Code 元信息）
     if (/^\s*<(environment_info|workspace_info)>/.test(text)) return '';
-    // 提取文件引用（先剔除 <instructions> 块，避免把指令文件当作用户引用）：
-    // VS Code 把拖进聊天框的文件/文件夹以 attachment 形式包在消息里，这里取出真实路径、
-    // 随提问透传给 DSH（只传路径不内联内容，DSH 用自己的工具读取）。
+    // 文件引用处理（先剔除 <instructions> 块，避免把指令文件当作用户引用）：
+    // VS Code 把拖进聊天框的文件/文件夹以 <attachment> 块内联在消息里（含完整文件内容），
+    // 这里整块剥离、只取真实路径随提问透传给 DSH（DSH 用自己的工具读取，不浪费 token）。
     const noInstr = text.replace(/<instructions>[\s\S]*?<\/instructions>/gi, '');
-    const attachPaths = extractAttachmentPaths(noInstr);
+    const { cleaned: noAttach, paths: attachPaths } = extractAndStripAttachments(noInstr);
     const attachSuffix = attachPaths.length ? ('\n\n【文件引用】\n' + attachPaths.map((p) => '- ' + p).join('\n')) : '';
+    if (!noAttach.trim()) {
+      // 整条消息只有附件：输出引用块（不带「用户：」前缀，身份键会自动跳过，
+      // 引用块与其后真正的问题消息一起序列化发给 DSH）
+      return attachPaths.length ? ('【文件引用】\n' + attachPaths.map((p) => '- ' + p).join('\n')) : '';
+    }
+    text = noAttach; // 后续解析都基于剥离附件后的文本，文件内容绝不透传
     // 保留 Copilot 独有记忆（userMemory/sessionMemory/repoMemory 的正文，去掉 XML 包装）
     const memText = extractMemoryBlocks(text);
     if (memText) {
