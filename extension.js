@@ -1231,7 +1231,7 @@ function firstLmQuestionText(messages) {
     const role = m && m.role;
     if (role !== 1 && role !== 'user' && role !== 'User') continue;
     const full = lmMessageText(m);
-    if (full.startsWith('用户：')) return full.slice(3).trim();
+    if (full.startsWith('用户：')) return stripAttachSuffix(full.slice(3));
   }
   return '';
 }
@@ -1242,7 +1242,7 @@ function lastLmUserText(messages) {
     const role = m && m.role;
     if (role !== 1 && role !== 'user' && role !== 'User') continue;
     const full = lmMessageText(m);
-    if (full.startsWith('用户：')) return full.slice(3).trim();
+    if (full.startsWith('用户：')) return stripAttachSuffix(full.slice(3));
   }
   return '';
 }
@@ -1255,7 +1255,7 @@ function prevLmUserText(messages) {
     if (role !== 1 && role !== 'user' && role !== 'User') continue;
     const full = lmMessageText(m);
     if (!full.startsWith('用户：')) continue;
-    const t = full.slice(3).trim();
+    const t = stripAttachSuffix(full.slice(3));
     if (!t) continue;
     seen++;
     if (seen === 2) return t;
@@ -1270,7 +1270,7 @@ function findLmUserIndex(messages, lastUserText) {
     const role = m && m.role;
     if (role !== 1 && role !== 'user' && role !== 'User') continue;
     const full = lmMessageText(m);
-    if (full.startsWith('用户：') && full.slice(3).trim() === lastUserText) return i;
+    if (full.startsWith('用户：') && stripAttachSuffix(full.slice(3)) === lastUserText) return i;
   }
   return -1;
 }
@@ -1285,12 +1285,12 @@ function normalizeFileUserText(u) {
   const raw = String(u || '').trim();
   if (!raw) return '';
   const inner = extractUserRequest(raw);
-  if (inner !== null) return inner;
+  if (inner !== null) return stripAttachSuffix(inner);
   const cleaned = stripCopilotContext(raw);
   if (!cleaned) return '';
   const inner2 = extractUserRequest(cleaned);
-  if (inner2 !== null) return inner2;
-  return cleaned;
+  if (inner2 !== null) return stripAttachSuffix(inner2);
+  return stripAttachSuffix(cleaned);
 }
 
 /**
@@ -1428,6 +1428,43 @@ function stripJunkPrefix(t) {
   return '';
 }
 
+/**
+ * 提取 VS Code 消息里附带的文件引用路径（<attachment filePath="..."> / <file path|uri="...">）。
+ * 只传路径、不内联内容——DSH 用自己的工具读取文件，省 token。
+ * @param {string} t
+ * @returns {string[]}
+ */
+function extractAttachmentPaths(t) {
+  const out = [];
+  const re = /<attachment\b[^>]*\bfilePath\s*=\s*"([^"]+)"/gi;
+  let m;
+  while ((m = re.exec(String(t || '')))) {
+    const p = m[1].trim();
+    if (p && !out.includes(p)) out.push(p);
+  }
+  const re2 = /<(?:file|attachment)\b[^>]*\b(?:path|uri)\s*=\s*"([^"]+)"/gi;
+  while ((m = re2.exec(String(t || '')))) {
+    let p = m[1].trim();
+    if (/^file:\/\//i.test(p)) {
+      try { p = decodeURIComponent(new URL(p).pathname); } catch (_) { /* 保持原样 */ }
+      if (process.platform === 'win32' && /^\/[A-Za-z]:/.test(p)) p = p.slice(1);
+    }
+    if (p && !out.includes(p)) out.push(p);
+  }
+  return out;
+}
+
+/**
+ * 身份键清洗：把「用户：提问」末尾的【文件引用】段截掉，
+ * 让 lastLmUserText/prevLmUserText/findLmUserIndex 等身份判定只比对真实提问文本。
+ * @param {string} t
+ * @returns {string}
+ */
+function stripAttachSuffix(t) {
+  const idx = String(t || '').indexOf('\n\n【文件引用】');
+  return idx >= 0 ? t.slice(0, idx).trim() : t;
+}
+
 function lmMessageText(m) {
   const role = m && m.role;
   const isUser = role === 'user' || role === 1 || role === 'User';
@@ -1453,35 +1490,41 @@ function lmMessageText(m) {
   if (isUser) {
     // 环境/工作区快照消息：整条丢弃（DSH 有实时文件访问，静态快照无用；尾注也是 VS Code 元信息）
     if (/^\s*<(environment_info|workspace_info)>/.test(text)) return '';
+    // 提取文件引用（先剔除 <instructions> 块，避免把指令文件当作用户引用）：
+    // VS Code 把拖进聊天框的文件/文件夹以 attachment 形式包在消息里，这里取出真实路径、
+    // 随提问透传给 DSH（只传路径不内联内容，DSH 用自己的工具读取）。
+    const noInstr = text.replace(/<instructions>[\s\S]*?<\/instructions>/gi, '');
+    const attachPaths = extractAttachmentPaths(noInstr);
+    const attachSuffix = attachPaths.length ? ('\n\n【文件引用】\n' + attachPaths.map((p) => '- ' + p).join('\n')) : '';
     // 保留 Copilot 独有记忆（userMemory/sessionMemory/repoMemory 的正文，去掉 XML 包装）
     const memText = extractMemoryBlocks(text);
     if (memText) {
       const rest = text.replace(/<(userMemory|sessionMemory|repoMemory)>\s*[\s\S]*?\s*<\/\1>/g, '').trim();
       if (rest) {
         const innerQ = extractUserRequest(rest);
-        return '【Copilot 记忆】\n' + memText + '\n\n用户：' + (innerQ !== null ? innerQ : rest);
+        return '【Copilot 记忆】\n' + memText + '\n\n用户：' + (innerQ !== null ? innerQ : rest) + attachSuffix;
       }
-      return '【Copilot 记忆】\n' + memText;
+      return '【Copilot 记忆】\n' + memText + attachSuffix;
     }
     // 优先提取 <userRequest> / <prompt> 内的真实提问（VS Code 会把提问包在 <prompt> 里，
     // 前面是 instructions/AGENTS.md 等上下文——只保留提问本身，避免污染会话与身份键）
     const inner = extractUserRequest(text);
-    if (inner !== null) return '用户：' + inner;
+    if (inner !== null) return '用户：' + inner + attachSuffix;
     // 剥掉 Copilot instructions 前置说明与 <instructions> 块后，若还有真实内容则继续
     const cleaned = stripCopilotContext(text);
     if (cleaned !== text) {
       if (!cleaned) return ''; // 纯 instructions/上下文 → 丢弃
       text = cleaned;
       const inner2 = extractUserRequest(text);
-      if (inner2 !== null) return '用户：' + inner2;
+      if (inner2 !== null) return '用户：' + inner2 + attachSuffix;
     }
     // 垃圾块开头：剥离前缀保留尾部真实内容，而不是整条丢弃
     if (isJunkUserText(text)) {
       const stripped = stripJunkPrefix(text);
-      if (stripped) return '用户：' + stripped;
+      if (stripped) return '用户：' + stripped + attachSuffix;
       return '';
     }
-    return '用户：' + text;
+    return '用户：' + text + attachSuffix;
   }
   // 助手消息：剥掉我们上一轮发出的「⏳ 已提交给 DeepSeek Harness…」占位前缀，
   // 避免它作为对话上下文回传给 DSH（保留其后真正的回答内容）
