@@ -1440,21 +1440,19 @@ function stripJunkPrefix(t) {
  * @param {string} t 整条消息文本
  * @returns {string[]}
  */
-function attachmentMessagePaths(t) {
-  const s = String(t || '').trim();
-  if (!/^<attachment\b/i.test(s)) return [];
+function stripAndExtractAttachments(t) {
+  const s = String(t || '');
   const paths = [];
   const push = (p) => { if (p && !paths.includes(p)) paths.push(p); };
-  // 1) filepath 注释（HTML 注释 / 双斜杠 / 井号 三种变体，正则从宽）
-  let m = s.match(/<!--\s*filepath:\s*([^>\r\n]+?)\s*-->/i);
-  if (!m) m = s.match(/(?:^|\n)\s*(?:\/\/|#)\s*filepath:\s*(.+?)(?:\r?\n|$)/i);
-  if (m) push(m[1].trim());
-  // 2) filePath / path / uri 属性
+  // 路径提取：优先开标签 filePath 属性（实测主格式 <attachment id=... filePath="...">），
+  // 其次正文 filepath 注释（<!-- --> / // / # 变体），最后 id 属性兜底（拼工作区）。
+  const attrRe = /<attachment\b[^>]*\bfilePath\s*=\s*"([^"]+)"/gi;
+  let m;
+  while ((m = attrRe.exec(s))) push(m[1].trim());
   if (!paths.length) {
-    const am = s.match(/<attachment\b[^>]*\bfilePath\s*=\s*"([^"]+)"/i)
-      || s.match(/<attachment\b[^>]*\b(?:path|uri)\s*=\s*"([^"]+)"/i);
-    if (am) {
-      let p = am[1].trim();
+    const attrRe2 = /<attachment\b[^>]*\b(?:path|uri)\s*=\s*"([^"]+)"/gi;
+    while ((m = attrRe2.exec(s))) {
+      let p = m[1].trim();
       if (/^file:\/\//i.test(p)) {
         try { p = decodeURIComponent(new URL(p).pathname); } catch (_) { /* 保持原样 */ }
         if (process.platform === 'win32' && /^\/[A-Za-z]:/.test(p)) p = p.slice(1);
@@ -1462,21 +1460,39 @@ function attachmentMessagePaths(t) {
       push(p);
     }
   }
-  // 3) id 属性兜底（file:NAME 或 NAME）
+  if (!paths.length) {
+    const cm = s.match(/<!--\s*filepath:\s*([^>\r\n]+?)\s*-->/i)
+      || s.match(/(?:^|\n)\s*(?:\/\/|#)\s*filepath:\s*(.+?)(?:\r?\n|$)/i);
+    if (cm) push(cm[1].trim());
+  }
   if (!paths.length) {
     const im = s.match(/<attachment\b[^>]*\bid\s*=\s*"([^"]+)"/i);
     if (im) {
-      let name = im[1].trim();
-      name = name.replace(/^file:/i, '').replace(/^active editor:/i, '').trim();
+      let name = im[1].trim().replace(/^file:/i, '').replace(/^active editor:/i, '').trim();
       if (name && !/^[A-Za-z]:[\\/]/.test(name) && !/^[\\/]/.test(name)) {
-        // 仅为文件名：拼接工作区目录（找不到也能给 DSH 一个可搜的线索）
         const ws = getWorkspaceDir();
         if (ws) name = path.join(ws, name);
       }
       push(name);
     }
   }
-  return paths;
+  // 容器剥离：优先 <attachments>…</attachments>（复数包裹是 VS Code 专用，
+  // 文件内容里几乎不可能出现 </attachments>，可安全取最后一个）；
+  // 回退 <attachment>…</attachment>（首个开标签到最后一个闭标签，内容里的
+  // 字面 <attachment> 文本位于中间，不影响首尾定位）。
+  let cleaned = s;
+  const a1 = s.search(/<attachments\b/i);
+  const z1 = s.lastIndexOf('</attachments>');
+  if (a1 >= 0 && z1 > a1) {
+    cleaned = s.slice(0, a1) + s.slice(z1 + '</attachments>'.length);
+  } else {
+    const a2 = s.search(/<attachment\b/i);
+    const z2 = s.lastIndexOf('</attachment>');
+    if (a2 >= 0 && z2 > a2) {
+      cleaned = s.slice(0, a2) + s.slice(z2 + '</attachment>'.length);
+    }
+  }
+  return { cleaned: cleaned.trim(), paths };
 }
 
 /**
@@ -1515,21 +1531,18 @@ function lmMessageText(m) {
   if (isUser) {
     // 环境/工作区快照消息：整条丢弃（DSH 有实时文件访问，静态快照无用；尾注也是 VS Code 元信息）
     if (/^\s*<(environment_info|workspace_info)>/.test(text)) return '';
-    // 文件引用处理：VS Code 把拖进聊天框的文件/文件夹作为**独立的 user 消息**投递
-    //（整条形如 <attachment id="...">…文件内容…</attachment>）。这里按整条消息解析：
-    // 提取真实路径、丢弃文件内容（DSH 用自己的工具读取，不浪费 token）。
-    if (/^\s*<attachment\b/i.test(text)) {
-      const paths = attachmentMessagePaths(text);
-      return paths.length ? ('【文件引用】\n' + paths.map((p) => '- ' + p).join('\n')) : '';
-    }
-    let attachPaths = [];
-    // 兼容：附件与提问混在同一条消息里时（极少见），剥离 instructions 后再按整条解析
+    // 文件引用处理：VS Code 把拖进聊天框的文件以 <attachments>/<attachment> 容器包裹在
+    // user 消息里（独立消息或与 <userRequest> 提问同消息两种形态均有）。统一先剥离
+    // 附件容器、提取 filePath 路径，再对剩余文本走提问解析——只透传路径不传内容。
     const noInstr0 = text.replace(/<instructions>[\s\S]*?<\/instructions>/gi, '').trim();
-    if (/^\s*<attachment\b/i.test(noInstr0)) {
-      attachPaths = attachmentMessagePaths(noInstr0);
-      text = noInstr0.replace(/[\s\S]*/, '').trim(); // 附件独占 → 文本清空
-    }
+    const { cleaned: noAttach, paths: attachPaths } = stripAndExtractAttachments(noInstr0);
     const attachSuffix = attachPaths.length ? ('\n\n【文件引用】\n' + attachPaths.map((p) => '- ' + p).join('\n')) : '';
+    if (!noAttach) {
+      // 整条消息只有附件：输出引用块（不带「用户：」前缀，身份键会自动跳过，
+      // 引用块与其后真正的问题消息一起序列化发给 DSH）
+      return attachPaths.length ? ('【文件引用】\n' + attachPaths.map((p) => '- ' + p).join('\n')) : '';
+    }
+    text = noAttach; // 后续解析都基于剥离附件后的文本，文件内容绝不透传
     // 保留 Copilot 独有记忆（userMemory/sessionMemory/repoMemory 的正文，去掉 XML 包装）
     const memText = extractMemoryBlocks(text);
     if (memText) {
@@ -1668,9 +1681,17 @@ function findDshKnownBoundary(messages, lastUserText) {
 function serializeLmMessages(messages, opts) {
   const markForeign = !!(opts && opts.markForeignAssistant);
   const out = [];
+  const emittedBlocks = new Set();
   for (const m of messages || []) {
     const s = lmMessageText(m);
     if (!s) continue;
+    if (s.startsWith('【文件引用】')) {
+      // 引用块消息：跨消息去重——VS Code 会把同一文件以 active file 与附件各传一次
+      if (emittedBlocks.has(s)) continue;
+      emittedBlocks.add(s);
+      out.push(s);
+      continue;
+    }
     if (markForeign && s.startsWith('助手：')) {
       out.push('【Copilot 其他模型回答】' + s);
     } else {
@@ -1968,7 +1989,7 @@ async function handleDshModelRequest(model, messages, options, progress, token) 
       // 切走期间其他模型的问答（外来段）+ 当前提问是 DSH 唯一缺失的信息，补发并打产地标签。
       const boundary = findDshKnownBoundary(messages, entry.lastUserText);
       if (boundary >= 0) {
-        const delta = serializeLmMessages((messages || []).slice(boundary + 1), { markForeignAssistant: true });
+        const delta = serializeLmMessages((messages || []).slice(boundary + 1), { markForeignAssistant: cfg().get('dshPanel.markForeignAssistant', true) });
         if (delta.trim()) taskText = delta;
       } else {
         // 兜底：找不到产地标记（历史被编辑等）→ 退化为「上次已发提问之后」的增量
