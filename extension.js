@@ -1613,16 +1613,23 @@ function findDshKnownBoundary(messages, lastUserText) {
   for (let i = (messages || []).length - 1; i >= 0; i--) {
     if (isDshProducedAnswer(messages[i])) return i;
   }
+  // 辅信号（无 ⏳ 标记时兜底）：从末尾扫描所有与 lastUserText 同文本的提问，
+  // 取第一个「其后紧跟 assistant」的——支持用户重复提问同一文本的场景
+  //（最后一次提问尚无答案，会被跳过，取上一组问答的答案为边界）。
   if (lastUserText) {
-    const idx = findLmUserIndex(messages, lastUserText);
-    if (idx >= 0) {
-      for (let j = idx + 1; j < (messages || []).length; j++) {
-        const m = messages[j];
-        const role = m && m.role;
-        const isUser = role === 'user' || role === 1 || role === 'User';
-        const isAssistant = role === 'assistant' || role === 2 || role === 'Assistant';
+    for (let i = (messages || []).length - 1; i >= 0; i--) {
+      const m = messages[i];
+      const role = m && m.role;
+      if (role !== 1 && role !== 'user' && role !== 'User') continue;
+      const full = lmMessageText(m);
+      if (!full.startsWith('用户：') || stripAttachSuffix(full.slice(3)) !== lastUserText) continue;
+      for (let j = i + 1; j < (messages || []).length; j++) {
+        const mm = messages[j];
+        const r2 = mm && mm.role;
+        const isUser = r2 === 'user' || r2 === 1 || r2 === 'User';
+        const isAssistant = r2 === 'assistant' || r2 === 2 || r2 === 'Assistant';
         if (isAssistant) return j;
-        if (isUser) break; // 答案被编辑/丢失 → 不视为已知
+        if (isUser) break; // 答案被编辑/丢失 → 该组问答不完整，继续找更早的同文本提问
       }
     }
   }
@@ -1901,13 +1908,23 @@ async function handleDshModelRequest(model, messages, options, progress, token) 
         }
       }
     }
+    // 当前对话出现过的全部【文件引用】块签名：引用变化说明带来了新文件，
+    // 不属于「同一提问的重复投递」，必须放行发送（否则新拖的文件永远发不出去）。
+    let currentAttachSig = '';
+    for (const mm of messages || []) {
+      const s = lmMessageText(mm);
+      if (!s) continue;
+      const ai = s.indexOf('【文件引用】');
+      if (ai >= 0) currentAttachSig += (currentAttachSig ? '||' : '') + s.slice(ai);
+    }
     // 去重：VS Code 会把同一次提问投递两次（「裸提问」+「instructions+<prompt>提问」），
-    // 归一化后 currentPrompt 相同；若该会话已有进行中/已完成的同题回合，直接返回空，
-    // 避免 DSH 出现两个会话或同题重复提交。
+    // 归一化后 currentPrompt 相同且附件签名一致；此时若该会话已有进行中/已完成的同题
+    // 回合（20 秒内），直接回放答案，避免 DSH 出现两个会话或同题重复提交。
     if (entry && entry.dshSessionId && entry.workspacePath === workspacePath
       && entry.lastUserText === currentPrompt
+      && (entry.lastAttachSig || '') === currentAttachSig
       && (entry.pending || entry.completed)
-      && entryFresh(entry, 60 * 1000)) {
+      && entryFresh(entry, 20 * 1000)) {
       await replayDshAnswer(base, entry.dshSessionId, Number(cfg().get('dshPanel.chatTimeoutMs', 900000)) || 900000, progress, token);
       return;
     }
@@ -1952,6 +1969,7 @@ async function handleDshModelRequest(model, messages, options, progress, token) 
       }
     }
     entry.lastUserText = currentPrompt;
+    entry.lastAttachSig = currentAttachSig;
     entry.pending = true;
     entry.completed = false;
     entry.lastUsedAt = Date.now();
