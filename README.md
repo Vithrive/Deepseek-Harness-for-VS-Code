@@ -14,6 +14,7 @@
 ## 🙏 致谢
 
 - [Pelapis](https://github.com/Pelapis)——贡献 macOS 面板编辑快捷键修复（内置插件 `dsh-webview-clipboard`，PR #11）。
+- [curtainsmall](https://github.com/curtainsmall)——修复面板 iframe 非整数倍缩放的整页模糊（改用 CSS zoom，PR #10）。
 
 ---
 
@@ -38,7 +39,7 @@
 - **自动检测 / 自动启动 / 自动安装** dsh，服务就绪后再渲染，避免白屏；
 - **工作区自动对接**：以 VS Code 当前工作区启动 dsh 并注册到 DSH 工作区列表（幂等，不覆盖你在 DSH 里的手动选择）；
 - **远程支持**：Remote-SSH / Dev Containers 下运行于服务器端，自动检测安装服务器端 dsh、经端口转发把面板接入本地 VS Code；
-- 面板按钮：刷新（不打断运行中的任务）/ 重启 dsh web / 在浏览器中打开；字号跟随 `editor.fontSize` 等比缩放；
+- 面板按钮：刷新（不打断运行中的任务）/ 重启 dsh web / 在浏览器中打开；字号跟随 `editor.fontSize` 等比缩放（CSS zoom 实现，非整数倍缩放同样清晰）；
 - **发送选中内容 / 拖放文件到 DSH 对话框**（自动安装配套插件 `dsh-drop-caret`）：把文件、文件夹、代码段以 `路径:行号` 引用精确插入对话框光标处；点击 DSH 对话中的外链在系统浏览器打开（配合 DSH 插件 `dsh-open-links`）。
 - **macOS 编辑快捷键修复（自动安装配套插件 `dsh-webview-clipboard`）**：修复 macOS 上面板内文本编辑快捷键失效的问题——按键本可到达 DSH 页面，但浏览器对它们的原生默认动作在「跨源 iframe 内嵌于 webview」这条链路上不会发生。覆盖：⌘C/⌘V/⌘X/⌘A 复制粘贴、⌘Z/⌘⇧Z 撤销重做、⌘←/→/↑/↓ 与 ⌥←/→ 光标按行/词移动（含 ⇧ 选区）、⌘⌫ 删至行首、⌥⌫ 删词。插件在 DSH 页面内拦截并显式执行（execCommand / 选区操作，删除走编辑管线保持撤销栈完整）。仅在「被 Electron 应用内嵌 + macOS」时启用；普通浏览器打开 DSH、以及 Windows / Linux 上的行为完全不变。
 
