@@ -999,6 +999,11 @@ function attachDshOutputReader(child) {
           setDshAuthCapable(false); // 老版 dsh：URL 无 token 参数
         }
       }
+      if (line.indexOf('opening the default browser') >= 0) {
+        // --no-open 未生效（老版本不支持该参数等）：提示一次便于定位。
+        console.warn('[DeepSeek Harness] dsh 自行打开了系统浏览器（--no-open 未生效）。' +
+          '新版 dsh 由扩展自动抑制弹页；若仍弹页请检查 dshPanel.openSystemBrowser 与 dsh 配置。');
+      }
     }
     if (buf.length > 64 * 1024) buf = '';
   };
