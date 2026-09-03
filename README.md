@@ -65,6 +65,7 @@
 | `dshPanel.dshCommand` | `dsh` | dsh 命令（可填完整路径） |
 | `dshPanel.killOnDispose` | `true` | 扩展停用时是否结束它启动的 dsh |
 | `dshPanel.openSystemBrowser` | `false` | 扩展启动 dsh 时是否保留弹系统浏览器的旧行为 |
+| `dshPanel.installClipboardPlugin` | `true` | 自动安装内置 `dsh-webview-clipboard` 插件（修复 macOS 面板内编辑快捷键；Windows/Linux 上为惰性文件不影响行为）。怀疑影响 dsh web 启动时可关闭对比 |
 
 ### dsh web 浏览器认证（v0.8.35 起，自动完成，无需任何操作）
 

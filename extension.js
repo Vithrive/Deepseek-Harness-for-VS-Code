@@ -1878,8 +1878,12 @@ async function ensureDshPlugins() {
       changed = true;
     }
     // 内置剪贴板兼容插件（文件随扩展直接写入，不走 npm）。
-    if (await ensureClipboardPlugin(profileDir)) {
-      changed = true;
+    // 仅在 macOS 的 VS Code webview 内嵌场景激活（DSH 页面本地判定），
+    // Windows/Linux 上为惰性文件；可经 dshPanel.installClipboardPlugin 关闭。
+    if (cfg().get('dshPanel.installClipboardPlugin', true)) {
+      if (await ensureClipboardPlugin(profileDir)) {
+        changed = true;
+      }
     }
     return changed;
   } catch (e) {
@@ -3694,5 +3698,7 @@ module.exports.__internals = {
   extractTokenParam,
   apiBase,
   normAuthority,
-  startDshAndWaitReady
+  startDshAndWaitReady,
+  clipboardPluginFiles,
+  CLIPBOARD_PLUGIN_NAME
 };
