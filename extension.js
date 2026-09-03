@@ -1344,7 +1344,8 @@ function buildIframeHtml(url, scale) {
   const origin = target.origin; // 形如 http://127.0.0.1:3080 或 https://xxxx.example.com
   const nonce = makeNonce();
   const s = Number.isFinite(scale) ? Math.min(2, Math.max(0.5, scale)) : 1;
-  const pct = (100 / s).toFixed(4);
+  // 用 CSS zoom 缩放（重新布局、按设备分辨率渲染，任意字号下清晰），
+  // 不用 transform:scale（渲染后栅格化缩放，非整数倍缩放时整页模糊）。
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1354,7 +1355,7 @@ function buildIframeHtml(url, scale) {
 </head>
 <body style="margin:0;padding:0;width:100vw;height:100vh;overflow:hidden;background:var(--vscode-editor-background);">
 <iframe id="dsh-frame" src="${escapeHtml(url)}"
-        style="width:${pct}%;height:${pct}%;border:none;display:block;transform:scale(${s});transform-origin:0 0;"
+        style="width:100%;height:100%;border:none;display:block;zoom:${s};"
         allow="clipboard-read; clipboard-write; autoplay"></iframe>
 <script nonce="${nonce}">
 (function () {
@@ -1367,10 +1368,7 @@ function buildIframeHtml(url, scale) {
     n = Math.min(2, Math.max(0.5, n));
     if (n === current) return;
     current = n;
-    var pct = (100 / n).toFixed(4) + '%';
-    frame.style.transform = 'scale(' + n + ')';
-    frame.style.width = pct;
-    frame.style.height = pct;
+    frame.style.zoom = String(n);
   }
   window.addEventListener('message', function (event) {
     var data = event.data;
