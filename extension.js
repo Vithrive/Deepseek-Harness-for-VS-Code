@@ -57,16 +57,35 @@ function getUrl() {
   return cfg().get('dshPanel.url', DEFAULT_URL);
 }
 
+// ── 配置输入净化（安全加固：以下设置项会经由 shell:true 的子进程，必须收敛到安全字符集）──
+// 主机名白名单：IPv4/IPv6 字面量与域名。
+const HOST_PATTERN = /^[A-Za-z0-9._:-]+$/;
+// shell 元字符：出现即拒绝（cmd.exe 与 POSIX sh 都会解释）。
+const SHELL_META_PATTERN = /[&|<>^%!"`;]|\r|\n/;
+const DEFAULT_PORT = 3080;
+
 function getHost() {
-  return cfg().get('dshPanel.host', '127.0.0.1');
+  const raw = String(cfg().get('dshPanel.host', '127.0.0.1') || '').trim();
+  // 非法（含 shell 元字符等）一律回退默认回环地址，堵 startDsh 参数注入。
+  return HOST_PATTERN.test(raw) ? raw : '127.0.0.1';
 }
 
 function getPort() {
-  return cfg().get('dshPanel.port', 3080);
+  // 强制整数 + 端口范围校验：堵 freePort 的 shell 拼接注入与 startDsh 参数注入。
+  const n = Math.floor(Number(cfg().get('dshPanel.port', DEFAULT_PORT)));
+  return Number.isFinite(n) && n >= 1 && n <= 65535 ? n : DEFAULT_PORT;
+}
+
+/** 净化用户配置的命令：拒绝 shell 元字符（允许空格，Windows shell 启动前会加引号）。 */
+function sanitizeCommand(cmd) {
+  const s = String(cmd || '').trim();
+  if (!s || SHELL_META_PATTERN.test(s)) return null;
+  return s;
 }
 
 function getDshCommand() {
-  return cfg().get('dshPanel.dshCommand', 'dsh');
+  // 配置了非法命令（含元字符）时回退 'dsh'，后续探测失败会自然落到 npx 兜底。
+  return sanitizeCommand(cfg().get('dshPanel.dshCommand', 'dsh')) || 'dsh';
 }
 
 /**
@@ -79,7 +98,9 @@ function getDshCommand() {
  */
 function runCommandOk(cmd, args, timeoutMs = 15000) {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, {
+    // 与 startDsh 同规则：含空格且确实是一个存在的文件 → 加引号；多 token 前缀 → shell 分词。
+    const cmdText = (process.platform === 'win32' && /\s/.test(cmd) && fs.existsSync(cmd)) ? '"' + cmd + '"' : cmd;
+    const child = spawn(cmdText, args, {
       shell: process.platform === 'win32',
       stdio: 'ignore',
       windowsHide: true
@@ -109,7 +130,8 @@ function runCommandOk(cmd, args, timeoutMs = 15000) {
  */
 function runCommandOutput(cmd, args, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
-    const quoted = /\s/.test(cmd) ? `"${cmd}"` : cmd;
+    // 与 runCommandOk 同规则：存在的文件路径加引号；多 token 前缀由 shell 分词。
+    const quoted = (/\s/.test(cmd) && fs.existsSync(cmd)) ? `"${cmd}"` : cmd;
     exec(`${quoted} ${args.join(' ')}`, {
       timeout: timeoutMs,
       windowsHide: true,
@@ -915,6 +937,9 @@ async function startDsh() {
   // 使用 ensureDshInstalled 解析出的启动方式（全局 dsh 或 npx）。
   // 兜底回退到配置的命令，避免异常时序下拿到空值。
   const inv = dshInvocation || { cmd: getDshCommand(), prefix: [] };
+  // host/port 均已净化（getHost 白名单 / getPort 整数），cmd 经 sanitizeCommand
+  // 拒绝 shell 元字符——Semgrep detect-child-process 指示的 shell:true 在此数据流
+  // 下无注入面（win32 需 shell 命中 dsh.cmd shim，POSIX 不经 shell）。
   const args = [
     ...inv.prefix,
     'web',
@@ -929,7 +954,11 @@ async function startDsh() {
       args.push('--no-open');
     }
   }
-  const child = spawn(inv.cmd, args, {
+  // Windows 经 cmd.exe 启动：含空格的 cmd 需区分两种形态——
+  //   a) 单个存在的可执行文件（带空格目录）→ 整体加引号；
+  //   b) 多 token 命令行前缀（如 "node C:\x\dsh.js"）→ 原样透传由 shell 分词（≤0.8.33 行为）。
+  const cmdText = (process.platform === 'win32' && /\s/.test(inv.cmd) && fs.existsSync(inv.cmd)) ? '"' + inv.cmd + '"' : inv.cmd;
+  const child = spawn(cmdText, args, {
     cwd: getWorkspaceDir(),
     shell: process.platform === 'win32',
     windowsHide: true,
@@ -1497,6 +1526,10 @@ async function installedPluginVersion(profileDir, plugin) {
 
 /** 用 npm pack 拉取插件并解压到 profile 的 node_modules（不依赖 pnpm）。 */
 async function installPluginViaNpm(profileDir, plugin) {
+  // 安全面守卫：plugin 仅允许内置常量（npm pack/tar 的命令拼接不做通用转义）。
+  if (plugin !== DSH_PLUGIN_NAME) {
+    throw new Error('installPluginViaNpm 仅支持内置插件 ' + DSH_PLUGIN_NAME);
+  }
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-plugin-'));
   try {
     const packOut = await new Promise((resolve, reject) => {
@@ -1526,6 +1559,10 @@ async function installPluginViaNpm(profileDir, plugin) {
 
 /** 尝试用官方 dsh plugin add 安装（依赖 dsh + pnpm）；成功返回 true。 */
 function tryDshPluginAdd(plugin) {
+  // 安全面守卫：plugin 仅允许内置常量（win32 经 shell 拼接）。
+  if (plugin !== DSH_PLUGIN_NAME) {
+    return Promise.resolve(false);
+  }
   return new Promise((resolve) => {
     const cmd = process.platform === 'win32' ? 'dsh.cmd' : 'dsh';
     const env = Object.assign({}, process.env, {
@@ -3698,5 +3735,9 @@ module.exports.__internals = {
   normAuthority,
   startDshAndWaitReady,
   clipboardPluginFiles,
-  CLIPBOARD_PLUGIN_NAME
+  CLIPBOARD_PLUGIN_NAME,
+  sanitizeCommand,
+  getHost,
+  getPort,
+  getDshCommand
 };
