@@ -733,6 +733,11 @@ function escapeHtml(s) {
 const DSH_PLUGIN_NAME = 'dsh-drop-caret';
 const DSH_PLUGIN_MIN = '0.2.2';
 const NPMJS_REGISTRY = 'https://registry.npmjs.org/';
+// 内置分发的兼容插件（随扩展文件直接写入 DSH web profile，不经 npm）：
+// 修复 macOS 上 DSH 页面被本扩展以跨源 iframe 内嵌时，复制/粘贴/剪切/全选
+// 快捷键失效的问题（详见 clipboardPluginFiles 内注释）。
+const CLIPBOARD_PLUGIN_NAME = 'dsh-webview-clipboard';
+const CLIPBOARD_PLUGIN_VERSION = '0.1.0';
 
 function dshHomeDir() {
   return process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
@@ -766,7 +771,12 @@ async function writeJsonFile(file, obj) {
   await fs.promises.writeFile(file, JSON.stringify(obj, null, 2) + '\n', 'utf8');
 }
 
-/** 幂等：确保 profile 的 package.json 声明该插件（dependencies + dsh.profile.bundles）。 */
+/**
+ * 幂等：确保 profile 的 package.json 声明该插件（dependencies + dsh.profile.bundles）。
+ * @param {string|null} versionSpec 依赖版本范围；传 null 表示不写入 dependencies
+ *   （用于随扩展内置分发、直接落盘的插件——npm 注册表上没有该包，写进
+ *   dependencies 反而会让用户后续 pnpm / dsh plugin add 解析失败）。
+ */
 async function ensureProfileDeclaration(profileDir, plugin, versionSpec) {
   const pkgFile = path.join(profileDir, 'package.json');
   const pkg = (await readJsonFile(pkgFile)) || { name: 'dsh-profile-web', private: true, dependencies: {}, dsh: { profile: { bundles: [] } } };
@@ -775,7 +785,7 @@ async function ensureProfileDeclaration(profileDir, plugin, versionSpec) {
   pkg.dsh.profile = pkg.dsh.profile || {};
   pkg.dsh.profile.bundles = pkg.dsh.profile.bundles || [];
   let changed = false;
-  if (!pkg.dependencies[plugin]) {
+  if (versionSpec !== null && !pkg.dependencies[plugin]) {
     pkg.dependencies[plugin] = versionSpec;
     changed = true;
   }
@@ -853,6 +863,201 @@ function tryDshPluginAdd(plugin) {
 }
 
 /**
+ * 生成内置兼容插件 dsh-webview-clipboard 的全部文件内容。
+ *
+ * 问题（macOS）：面板把 DSH Web GUI 以跨源 iframe 内嵌在
+ * VS Code webview 中，macOS 上 ⌘C/⌘V/⌘X/⌘A 的按键虽能到达 DSH 页面，
+ * 但 Chromium 对这些按键的「原生默认动作」（复制/粘贴/剪切/全选）在这条
+ * iframe 链路上不会发生，VS Code 自己的剪贴板命令又只作用于工作台文档，
+ * 于是面板里复制、粘贴全部失效（Windows 原生默认动作正常，无此问题）。
+ *
+ * 修复：DSH 页面内部（经本插件注入）拦截这些组合键，preventDefault 后用
+ * document.execCommand('paste'/'copy'/'cut'/'selectAll') 显式执行——该
+ * 命令路径不受上述限制，可正确作用于聚焦的可编辑元素 / 当前选区
+ * （已在 macOS VS Code webview 中实测验证）。
+ *
+ * 启用条件（全部满足，均在 DSH 页面本地判定，天然兼容 Remote 场景）：
+ *   1. 被 iframe 内嵌（window.parent !== window，普通浏览器打开不启用）
+ *   2. macOS（UA / userAgentData / platform 三路判定）
+ *   3. 宿主是 Electron 应用（UA 含 "Electron/"；浏览器内嵌 DSH——例如
+ *      Chrome 扩展——不启用，保持原生剪贴板行为，避免误伤）
+ * @returns {Record<string, string>} 相对路径 → 文件内容
+ */
+function clipboardPluginFiles() {
+  const pkgJson = JSON.stringify({
+    name: CLIPBOARD_PLUGIN_NAME,
+    version: CLIPBOARD_PLUGIN_VERSION,
+    description: 'DeepSeek Harness 插件：DSH 页面被 VS Code webview（跨源 iframe）内嵌时，修复 macOS 上复制/粘贴/剪切/全选快捷键失效的问题（改用 execCommand 显式执行剪贴板编辑命令）。由 Deepseek-Harness-for-VS-Code 扩展内置分发。',
+    keywords: ['deepseek', 'harness', 'dsh', 'cordis', 'plugin', 'clipboard', 'webview', 'vscode'],
+    type: 'module',
+    main: 'lib/index.js',
+    exports: {
+      '.': './lib/index.js',
+      './client': './lib/client.js',
+      './package.json': './package.json'
+    },
+    files: ['lib', 'cordis.patch.yml'],
+    license: 'MIT',
+    dsh: {
+      client: {
+        inject: ['@deepseek-ai/dsh-client-runtime'],
+        platform: 'web'
+      },
+      bundle: {
+        patch: './cordis.patch.yml'
+      }
+    }
+  }, null, 2) + '\n';
+
+  const patchYml = [
+    '# dsh-webview-clipboard bundle patch: one insert registering the dual-face plugin.',
+    "# The row name must match the npm package name and the host half's exported `name`.",
+    '- insert:',
+    '    - id: webview-clipboard',
+    `      name: '${CLIPBOARD_PLUGIN_NAME}'`,
+    ''
+  ].join('\n');
+
+  const indexJs = `// ${CLIPBOARD_PLUGIN_NAME} host half: no-op.
+// 本插件只做客户端（浏览器侧）兼容：修复 DSH 页面被 VS Code webview 内嵌时
+// macOS 上复制/粘贴等剪贴板编辑命令失效的问题。宿主侧无需任何逻辑。
+export const name = '${CLIPBOARD_PLUGIN_NAME}'
+
+export const inject = []
+
+export function apply(_ctx) {}
+`;
+
+  // 注意：本文件内容嵌在扩展的模板字面量里，正则里的反斜杠须写成 \\\\，
+  // 否则模板字面量会把 \\/ 折叠成 / 造成注入脚本语法错误（同 buildIframeHtml 的前车之鉴）。
+  const clientJs = `// ${CLIPBOARD_PLUGIN_NAME} client bundle (ModuleLoader format)
+//
+// 背景（macOS + VS Code webview）：
+// DSH Web GUI 被扩展以「跨源 iframe」形式内嵌在 VS Code webview 里。
+// 在 macOS 上，按键虽然能到达页面，但 Chromium 对 ⌘C/⌘V/⌘X/⌘A 的
+// 「原生默认动作」（复制/粘贴/剪切/全选）在这条 iframe 链路上不会发生，
+// VS Code 自己的剪贴板命令也只会路由到工作台文档——于是面板里复制、
+// 粘贴全部失效（Windows 上原生默认动作正常，无此问题）。
+//
+// 修复：拦截这些组合键，preventDefault 后改用 document.execCommand(
+// 'paste'/'copy'/'cut'/'selectAll') 显式执行——这条命令路径不受上述限制，
+// 可正确作用于当前聚焦的可编辑元素/当前选区。
+//
+// 启用条件（在 DSH 页面本地判定，天然兼容 Remote 场景）：
+//   1. 被 iframe 内嵌（window.parent !== window；普通浏览器打开不启用）
+//   2. macOS（UA / userAgentData / platform 三路判定）
+//   3. 宿主是 Electron 应用（UA 含 "Electron/"；浏览器内嵌 DSH——例如
+//      Chrome 扩展——不启用，保持原生剪贴板行为，避免误伤）
+
+window.__ModuleLoader__.load({ id: '${CLIPBOARD_PLUGIN_NAME}', factory: (require) => {
+  var module = { exports: {} }
+  var exports = module.exports
+
+  var PLUGIN_VERSION = '${CLIPBOARD_PLUGIN_VERSION}'
+
+  function inIframe() {
+    try { return window.parent !== window } catch (e) { return false }
+  }
+
+  function isMac() {
+    var ua = navigator.userAgent || ''
+    if (/Macintosh|Mac OS X/i.test(ua)) return true
+    if (typeof navigator.platform === 'string' && /Mac/i.test(navigator.platform)) return true
+    try {
+      if (navigator.userAgentData && navigator.userAgentData.platform === 'macOS') return true
+    } catch (e) { /* ignore */ }
+    return false
+  }
+
+  function inElectron() {
+    return /Electron\\//.test(navigator.userAgent || '')
+  }
+
+  /** 是否启用兼容层。 */
+  function enabled() {
+    return inIframe() && isMac() && inElectron()
+  }
+
+  /** 事件目标是否为可编辑元素（粘贴/全选只对它们有意义）。 */
+  function isEditable(el) {
+    if (!el || el.nodeType !== 1) return false
+    var tag = el.tagName
+    if (tag === 'TEXTAREA' || tag === 'INPUT') return true
+    return el.isContentEditable === true
+  }
+
+  /** 组合键 → execCommand 命令名。 */
+  var COMMANDS = { v: 'paste', c: 'copy', x: 'cut', a: 'selectAll' }
+
+  function onKeyDown(e) {
+    if (e.defaultPrevented) return                 // DSH 自身已处理，尊重之
+    if (!(e.metaKey || e.ctrlKey) || e.altKey) return
+    var cmd = COMMANDS[String(e.key || '').toLowerCase()]
+    if (!cmd) return
+    if (!enabled()) return
+    if ((cmd === 'paste' || cmd === 'selectAll') && !isEditable(e.target)) return
+    e.preventDefault()
+    try {
+      var ok = document.execCommand(cmd)
+      if (!ok) console.warn('[${CLIPBOARD_PLUGIN_NAME}] execCommand("' + cmd + '") returned false')
+    } catch (err) {
+      console.warn('[${CLIPBOARD_PLUGIN_NAME}] execCommand("' + cmd + '") failed:', err)
+    }
+  }
+
+  function apply() {
+    window.addEventListener('keydown', onKeyDown, false)
+    window.__dshWebviewClipboard = {
+      version: PLUGIN_VERSION,
+      enabled: enabled(),
+      mac: isMac(),
+      electron: inElectron()
+    }
+  }
+
+  exports.apply = apply
+  exports.inject = []
+  return module.exports
+} })
+`;
+
+  return {
+    'package.json': pkgJson,
+    'cordis.patch.yml': patchYml,
+    'lib/index.js': indexJs,
+    'lib/client.js': clientJs
+  };
+}
+
+/**
+ * 确保内置兼容插件 dsh-webview-clipboard 已落盘并声明（不经 npm）。
+ * @returns {Promise<boolean>} 本次是否发生新增/升级（true 时需重启 dsh web 生效）。
+ */
+async function ensureClipboardPlugin(profileDir) {
+  try {
+    const installed = await installedPluginVersion(profileDir, CLIPBOARD_PLUGIN_NAME);
+    if (installed === CLIPBOARD_PLUGIN_VERSION) {
+      await ensureProfileDeclaration(profileDir, CLIPBOARD_PLUGIN_NAME, null);
+      return false; // 版本一致，无需写入
+    }
+    const files = clipboardPluginFiles();
+    const base = path.join(profileDir, 'node_modules', CLIPBOARD_PLUGIN_NAME);
+    for (const rel of Object.keys(files)) {
+      const dest = path.join(base, rel);
+      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+      await fs.promises.writeFile(dest, files[rel], 'utf8');
+    }
+    // dependencies 不写入该包（npm 注册表上没有），只登记 bundles 供 DSH 加载。
+    await ensureProfileDeclaration(profileDir, CLIPBOARD_PLUGIN_NAME, null);
+    return true;
+  } catch (e) {
+    console.error(`[DeepSeek Harness] 安装内置插件 ${CLIPBOARD_PLUGIN_NAME} 失败：`, e);
+    vscode.window.showWarningMessage(`安装 DSH 剪贴板兼容插件 ${CLIPBOARD_PLUGIN_NAME} 失败：${e.message}`);
+    return false;
+  }
+}
+
+/**
  * 确保 DSH web profile 已安装并声明 dsh-drop-caret 插件。
  * @returns {Promise<boolean>} 本次是否发生了新增/升级安装（true 时通常需重启 dsh web 生效）。
  */
@@ -861,16 +1066,23 @@ async function ensureDshPlugins() {
   try {
     const installed = await installedPluginVersion(profileDir, DSH_PLUGIN_NAME);
     await ensureProfileDeclaration(profileDir, DSH_PLUGIN_NAME, `^${DSH_PLUGIN_MIN}`);
+    let changed = false;
     if (installed && compareVersions(installed, DSH_PLUGIN_MIN) >= 0) {
-      return false; // 已满足，无需安装
+      // dsh-drop-caret 已满足，无需安装
+    } else {
+      // 未安装或版本过低：先试官方 dsh plugin add，失败回退 npm pack。
+      const viaCli = await tryDshPluginAdd(DSH_PLUGIN_NAME);
+      if (!viaCli) {
+        await installPluginViaNpm(profileDir, DSH_PLUGIN_NAME);
+      }
+      await ensureProfileDeclaration(profileDir, DSH_PLUGIN_NAME, `^${DSH_PLUGIN_MIN}`);
+      changed = true;
     }
-    // 未安装或版本过低：先试官方 dsh plugin add，失败回退 npm pack。
-    const viaCli = await tryDshPluginAdd(DSH_PLUGIN_NAME);
-    if (!viaCli) {
-      await installPluginViaNpm(profileDir, DSH_PLUGIN_NAME);
+    // 内置剪贴板兼容插件（文件随扩展直接写入，不走 npm）。
+    if (await ensureClipboardPlugin(profileDir)) {
+      changed = true;
     }
-    await ensureProfileDeclaration(profileDir, DSH_PLUGIN_NAME, `^${DSH_PLUGIN_MIN}`);
-    return true;
+    return changed;
   } catch (e) {
     console.error(`[DeepSeek Harness] 自动安装 ${DSH_PLUGIN_NAME} 失败：`, e);
     vscode.window.showWarningMessage(`自动安装 DSH 插件 ${DSH_PLUGIN_NAME} 失败：${e.message}`);
@@ -945,7 +1157,7 @@ async function preparePanelHtml(isTab) {
   const pluginInstalled = await ensureDshPlugins();
   if (pluginInstalled && (await checkUrl(getUrl()))) {
     // 服务已在运行但插件刚装上，需重启 dsh web 才加载。
-    vscode.window.showInformationMessage('已自动安装 DSH 插件 dsh-drop-caret，请点击面板顶部的「重启 dsh web」使其生效。');
+    vscode.window.showInformationMessage('已自动安装/更新 DSH 插件（dsh-drop-caret / dsh-webview-clipboard），请点击面板顶部的「重启 dsh web」使其生效。');
   }
 
   const ok = await ensureRunningOnce();
