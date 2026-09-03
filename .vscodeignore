@@ -4,4 +4,5 @@
 .vscode/**
 node_modules/**
 .git/**
+test/**
 proxy/*.log

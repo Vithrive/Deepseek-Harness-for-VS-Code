@@ -9,6 +9,8 @@
 
 如果喜欢本扩展请转至 [Deepseek-Harness-for-VS-Code](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code) 星标助力；对 Chrome Extension 有需求也请关注 [Deepseek-Harness-for-Chrome](https://github.com/Vithrive/Deepseek-Harness-for-Chrome)。
 
+> **版本适配**：本扩展 **v0.8.34 起**适配 **dsh v0.1.2-rc.1 及以上版本**——自动完成该版本起新增的 Web 浏览器认证（扩展受管认证代理，面板与 Copilot 桥接全程免登录、免打扰，详见下文「dsh web 浏览器认证」）；同时**向下兼容**未启用认证的旧版 dsh（启动参数探测、RPC 端点新旧格式自动回退）。
+
 ---
 
 ## 🚀 快速安装
@@ -23,6 +25,77 @@
   或在 VS Code 中：`Ctrl+Shift+P` → `Extensions: Install from VSIX...`。
 
 安装后 `Ctrl+Shift+P` → `Reload Window`。打开面板时扩展会自动检测并启动 DSH（未安装会提示并代为执行 `npm install -g @deepseek-ai/dsh`）。
+
+---
+
+## 🪟 忠实窗口（面板）
+
+- 把 DSH Web GUI 原样内嵌到侧边栏 / 辅助侧边栏 / **编辑器标签页**（标签页可 Pin 住；与侧边栏「单活动视图」自动让位，规避 DSH 前端 webview 单实例限制）；
+- **自动检测 / 自动启动 / 自动安装** dsh，服务就绪后再渲染，避免白屏；
+- **工作区自动对接**：以 VS Code 当前工作区启动 dsh 并注册到 DSH 工作区列表（幂等，不覆盖你在 DSH 里的手动选择）；
+- **远程支持**：Remote-SSH / Dev Containers 下运行于服务器端，自动检测安装服务器端 dsh、经端口转发把面板接入本地 VS Code；
+- 面板按钮：刷新（不打断运行中的任务）/ 重启 dsh web / 在浏览器中打开；字号跟随 `editor.fontSize` 等比缩放；
+- **发送选中内容 / 拖放文件到 DSH 对话框**（自动安装配套插件 `dsh-drop-caret`）：把文件、文件夹、代码段以 `路径:行号` 引用精确插入对话框光标处；点击 DSH 对话中的外链在系统浏览器打开（配合 DSH 插件 `dsh-open-links`）。
+
+### 使用示例：发送选中内容到对话框
+
+拖拽 / 右键发送是 `dsh-drop-caret` 最常用的能力，操作如下：
+
+1. 在 VS Code 中**框选住代码块 / 文字块**；
+2. **右键**，点击 **「DeepSeek Harness: 发送选中内容到对话框」**：
+
+   ![右键菜单：发送选中内容到对话框](media/send-selection-menu.png)
+3. 代码块所在行数的链接（`路径:起始行-结束行`）就会被发送到对话框，插入在当前光标位置：
+
+   ![发送结果出现在 DSH 对话框中](media/send-selection-result.png)
+4. 在 DSH 里直接发送消息即可，模型可通过引用精确定位到代码块所在文件与行号。
+
+> 同样地，也可以把文件 / 文件夹从系统文件管理器或 VS Code 资源管理器**直接拖进**对话框，插入位置同样是拖放点对应的光标位置。
+
+### 面板相关配置
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `dshPanel.url` | `http://127.0.0.1:3080` | 面板连接的 DSH 地址 |
+| `dshPanel.host` / `dshPanel.port` | `127.0.0.1` / `3080` | 自动启动时绑定的主机与端口 |
+| `dshPanel.autoStart` | `true` | 未运行时是否自动启动 dsh |
+| `dshPanel.autoRegisterWorkspace` | `true` | 是否把当前工作区自动注册为 DSH 工作区 |
+| `dshPanel.autoInstallDsh` | `true` | 未安装 dsh 时是否提示并代为安装 |
+| `dshPanel.dshCommand` | `dsh` | dsh 命令（可填完整路径） |
+| `dshPanel.killOnDispose` | `true` | 扩展停用时是否结束它启动的 dsh |
+| `dshPanel.openSystemBrowser` | `false` | 扩展启动 dsh 时是否保留弹系统浏览器的旧行为 |
+
+### dsh web 浏览器认证（v0.8.35 起，自动完成，无需任何操作）
+
+dsh `0.1.2-rc` 起为 Web GUI 启用了浏览器认证：每次 `dsh web` 启动会生成一个一次性「进程启动令牌」并打印形如 `dsh web: http://127.0.0.1:3080/?token=…` 的认证链接，浏览器打开该链接后换取签名 Cookie，此后凭 Cookie 访问；裸地址一律返回 401。同时 `/api` 还有浏览器信任围栏（Host 必须回环、Origin 与 Host 一致、拒绝跨站请求）。
+
+扩展的处理方式（**不关闭 dsh 的任何安全机制，全程无感**）：
+
+- 由扩展启动 dsh 时，自动捕获其 stdout 打印的认证链接，并在本机 `127.0.0.1` 随机端口启动一个**受管认证代理**：由代理完成令牌 → Cookie 换发，之后给每个转发请求（页面、API、WebSocket）注入凭据，面板与 Copilot 桥接全部改走代理；
+- 令牌会缓存到 VS Code 全局状态：其他窗口 / 重载 VS Code 后，只要 dsh 实例没变，依然静默认证；
+- 启动 dsh 时默认附加 `--no-open`，不再弹出系统浏览器（需要旧行为时打开 `dshPanel.openSystemBrowser`）；
+- 如果 dsh 是**在本扩展之外启动**的（拿不到它的令牌），首次打开面板会提示一次，二选一：「重启并自动认证（推荐）」由扩展接管 dsh，此后恢复完全静默；或把终端里 `dsh web:` 打印的认证链接整行粘贴进来；
+- 「在浏览器中打开」按钮会自动携带当前令牌，系统浏览器可正常换取自己的 Cookie；
+- Remote / 非回环地址场景不启用代理（认证须在 dsh 所在机器的浏览器完成一次），行为与旧版一致。
+
+### 对旧版本 dsh 的兼容（无认证版本）
+
+扩展对未启用 web 认证的旧版 dsh 保持完整兼容，回退路径全部自动、无感：
+
+- **启动参数**：`--no-open` 先经 `dsh web --help` 探测，老版本不支持就不传（不会因未知参数导致启动失败）；
+- **认证链路**：面板加载前会探测首页状态——旧版返回 200（无认证）即走原直连路径，不启用代理注入；「重启并自动认证」等引导也只在探测到 401 时出现；
+- **RPC 端点**：扩展按新版斜杠端点（`workspace/create` 等）请求，收到 404 自动回退旧点号端点（`workspace.create`）；`session/page` 不可用时回退 `session.history`；
+- **完全启动等待**：以「`dsh web:` 打印行」为就绪信号（新旧版本都会打印）；个别从不打印的极老版本会被记忆（`dsh.quietBoot`），之后不再等待。
+
+### 远程服务器（vscode-server）场景
+
+扩展声明 `extensionKind: ["workspace"]`，在 Remote-SSH / Dev Containers 等场景下运行于服务器端：
+
+1. 自动检测并安装服务器端的 dsh（`npm install -g @deepseek-ai/dsh`，要求服务器已装 Node.js 与 npm）；
+2. 自动端口转发：通过 `vscode.env.asExternalUri` 把远程 `127.0.0.1:3080` 暴露到本地，iframe 直接加载，无需手动配 SSH 隧道（首次转发确认允许即可）；
+3. dsh 以远程工作区为 cwd 启动并自动注册。
+
+如果 DSH 跑在另一台机器、且不是通过 VS Code Remote 连接的，可手动建隧道：`ssh -L 3080:127.0.0.1:3080 user@server`，并把 `dshPanel.autoStart` 设为 `false`。
 
 ---
 
@@ -52,6 +125,18 @@ Copilot 会话中途切到其他自定义模型问答、再切回 DSH 模型时�
 | `DeepSeek Harness: 诊断 DSH 模型注册表` | 导出模型注册表诊断数据（排查用） |
 
 > 取消等待不会杀掉 DSH 任务：任务会继续在 DSH 中运行，可到面板查看。
+
+### 桥接相关配置
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `dshPanel.enableDshModel` | `true` | 是否注册 DSH 聊天模型条目（关闭则桥接不生效，面板不受影响） |
+| `dshPanel.chatProvider` / `dshPanel.chatModel` | 空 | `DSH (DeepSeek Harness)` 条目使用的 provider / 模型（如 `deepseek-official` / `deepseek-v4-pro`）；留空跟随 DSH 默认 |
+| `dshPanel.chatAgentPreset` | 空 | DSH 会话创建时使用的 agent 预设（如 `liangshen`）；留空=DSH 默认 |
+| `dshPanel.dshReasoningEffort` | 空 | 推理档位兜底：off / low / high / max；界面选择优先 |
+| `dshPanel.chatTimeoutMs` | `900000` | 单次任务最长等待毫秒数（15 分钟），超时后任务仍在 DSH 面板运行 |
+| `dshPanel.chatSyncLookbackMin` | `60` | 聊天会话文件扫描窗口（分钟） |
+| `dshPanel.debugModelMessages` | `false` | 调试：把 VS Code 发给模型的消息结构写入 `.dsh-debug/` |
 
 ---
 
@@ -98,51 +183,6 @@ Copilot 桥接是**早期版本**，但已经过充分测试、**功能完全可
 - 欢迎大家在不同操作系统（Windows / macOS / Linux，以及 Remote-SSH、WSL、Dev Containers 等远程场景）中测试使用；
 - 如遇问题请在 [GitHub Issues](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/issues) 提出，作者会尽快回复和改进；
 - 再次强调：**Copilot 桥接不影响「忠实窗口」形态**——面板始终忠实呈现 DSH Web GUI，不对页面注入、改写或拦截任何东西，也不干涉你对 DSH 的插件开发与界面定制。
-
----
-
-## 🪟 忠实窗口（面板）
-
-- 把 DSH Web GUI 原样内嵌到侧边栏 / 辅助侧边栏 / **编辑器标签页**（标签页可 Pin 住；与侧边栏「单活动视图」自动让位，规避 DSH 前端 webview 单实例限制）；
-- **自动检测 / 自动启动 / 自动安装** dsh，服务就绪后再渲染，避免白屏；
-- **工作区自动对接**：以 VS Code 当前工作区启动 dsh 并注册到 DSH 工作区列表（幂等，不覆盖你在 DSH 里的手动选择）；
-- **远程支持**：Remote-SSH / Dev Containers 下运行于服务器端，自动检测安装服务器端 dsh、经端口转发把面板接入本地 VS Code；
-- 面板按钮：刷新（不打断运行中的任务）/ 重启 dsh web / 在浏览器中打开；字号跟随 `editor.fontSize` 等比缩放；
-- **发送选中内容 / 拖放文件到 DSH 对话框**（自动安装配套插件 `dsh-drop-caret`）：把文件、文件夹、代码段以 `路径:行号` 引用精确插入对话框光标处；点击 DSH 对话中的外链在系统浏览器打开（配合 DSH 插件 `dsh-open-links`）。
-
-### 面板相关配置
-
-| 配置项 | 默认值 | 说明 |
-| --- | --- | --- |
-| `dshPanel.url` | `http://127.0.0.1:3080` | 面板连接的 DSH 地址 |
-| `dshPanel.host` / `dshPanel.port` | `127.0.0.1` / `3080` | 自动启动时绑定的主机与端口 |
-| `dshPanel.autoStart` | `true` | 未运行时是否自动启动 dsh |
-| `dshPanel.autoRegisterWorkspace` | `true` | 是否把当前工作区自动注册为 DSH 工作区 |
-| `dshPanel.autoInstallDsh` | `true` | 未安装 dsh 时是否提示并代为安装 |
-| `dshPanel.dshCommand` | `dsh` | dsh 命令（可填完整路径） |
-| `dshPanel.killOnDispose` | `true` | 扩展停用时是否结束它启动的 dsh |
-
-### 桥接相关配置
-
-| 配置项 | 默认值 | 说明 |
-| --- | --- | --- |
-| `dshPanel.enableDshModel` | `true` | 是否注册 DSH 聊天模型条目（关闭则桥接不生效，面板不受影响） |
-| `dshPanel.chatProvider` / `dshPanel.chatModel` | 空 | `DSH (DeepSeek Harness)` 条目使用的 provider / 模型（如 `deepseek-official` / `deepseek-v4-pro`）；留空跟随 DSH 默认 |
-| `dshPanel.chatAgentPreset` | 空 | DSH 会话创建时使用的 agent 预设（如 `liangshen`）；留空=DSH 默认 |
-| `dshPanel.dshReasoningEffort` | 空 | 推理档位兜底：off / low / high / max；界面选择优先 |
-| `dshPanel.chatTimeoutMs` | `900000` | 单次任务最长等待毫秒数（15 分钟），超时后任务仍在 DSH 面板运行 |
-| `dshPanel.chatSyncLookbackMin` | `60` | 聊天会话文件扫描窗口（分钟） |
-| `dshPanel.debugModelMessages` | `false` | 调试：把 VS Code 发给模型的消息结构写入 `.dsh-debug/` |
-
-### 远程服务器（vscode-server）场景
-
-扩展声明 `extensionKind: ["workspace"]`，在 Remote-SSH / Dev Containers 等场景下运行于服务器端：
-
-1. 自动检测并安装服务器端的 dsh（`npm install -g @deepseek-ai/dsh`，要求服务器已装 Node.js 与 npm）；
-2. 自动端口转发：通过 `vscode.env.asExternalUri` 把远程 `127.0.0.1:3080` 暴露到本地，iframe 直接加载，无需手动配 SSH 隧道（首次转发确认允许即可）；
-3. dsh 以远程工作区为 cwd 启动并自动注册。
-
-如果 DSH 跑在另一台机器、且不是通过 VS Code Remote 连接的，可手动建隧道：`ssh -L 3080:127.0.0.1:3080 user@server`，并把 `dshPanel.autoStart` 设为 `false`。
 
 ---
 

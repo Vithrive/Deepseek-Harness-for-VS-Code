@@ -1,8 +1,8 @@
 {
   "name": "deepseek-harness-vscode",
   "displayName": "DeepSeek Harness for VSCode",
-  "description": "DeepSeek Harness (DSH) 的 VS Code 接入：侧边栏/标签页忠实呈现 DSH Web GUI 并自动检测启动，不影响用户对 DSH 本身的页面组织、第三方插件装配等二次开发行为；v0.7.13 起把 DSH 注册为 Copilot 聊天模型「DSH (DeepSeek Harness)、DeepSeek-V4-Pro (DSH)、DeepSeek-V4-Flash (DSH)……」——接收 Copilot 组织好的现成对话、滤除对话内容无关的 prompt、交给 DSH 二次组织、流式回写，旨在利用 DSH 强大的任务编排与工具调用能力，让 DeepSeek 系列模型发挥最大性能",
-  "version": "0.8.26",
+  "description": "DeepSeek Harness (DSH) 的 VS Code 接入：侧边栏/标签页忠实呈现 DSH Web GUI 并自动检测启动，不影响用户对 DSH 本身的页面组织、第三方插件装配等二次开发行为；v0.7.13 起把 DSH 注册为 Copilot 聊天模型「DSH (DeepSeek Harness)、DeepSeek-V4-Pro (DSH)、DeepSeek-V4-Flash (DSH)……」——接收 Copilot 组织好的现成对话、滤除对话内容无关的 prompt、交给 DSH 二次组织、流式回写，旨在利用 DSH 强大的任务编排与工具调用能力，发挥最大性能",
+  "version": "0.8.36",
   "publisher": "vithrive",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -61,6 +61,11 @@
           "default": true,
           "description": "是否把 VS Code 当前工作区自动注册为 DSH 工作区（新会话默认使用该工作区）"
         },
+        "dshPanel.openSystemBrowser": {
+          "type": "boolean",
+          "default": false,
+          "description": "扩展启动 dsh web 时是否保留弹系统浏览器的旧行为（默认关闭：新版 dsh web 的浏览器认证由扩展自动完成，面板内即用）"
+        },
         "dshPanel.autoInstallDsh": {
           "type": "boolean",
           "default": true,
@@ -110,6 +115,11 @@
           "type": "boolean",
           "default": false,
           "description": "调试：把 VS Code 发给 DSH 模型的消息结构写入工作区 .dsh-debug/ 目录"
+        },
+        "dshPanel.markForeignAssistant": {
+          "type": "boolean",
+          "default": true,
+          "description": "切回 DSH 模型补发中间对话时，是否给其他模型产出的回答加「【Copilot 其他模型回答】」产地标签（帮助 DSH 区分哪些回答不是它自己生成的）；关闭则不标注"
         },
         "dshPanel.dshReasoningEffort": {
           "type": "string",

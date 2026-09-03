@@ -26,6 +26,25 @@ let activeTab = null;
 let gContext = null;
 // dsh 语言模型提供方（模型选择器里的 DSH (DeepSeek Harness)）是否注册成功。
 let dshModelProviderRegistered = false;
+// dsh 0.1.2-rc 起新增 web 浏览器认证：进程启动令牌（每次重启变化，从 stdout 学习）。
+let dshLaunchToken = null;
+// 本地受管认证代理（null = 未创建或不可用：Remote 场景 / 目标非回环地址）。
+let authProxy = null;
+// ensureAuthProxy 的并发去重：多个视图/API 同时触发时只创建一次。
+let authProxyPromise = null;
+// 老版本 dsh 不识别 --no-open 时置位（启动快速退出后自动去掉该参数重试）。
+let dshNoOpenBroken = false;
+// dsh 是否支持 web 浏览器认证（首次捕获 stdout 令牌行置 true；
+// 确认为老版 dsh 后置 false 并持久化，启动等待逻辑据此跳过）。
+let dshAuthCapable;
+// 「dsh web: <url>」打印行的最后时间戳（新旧版本都打印，作为完全启动信号）。
+let dshBootAnnouncedAt = 0;
+// 进程内缓存的 --no-open 支持探测结果（undefined=未探测）。
+let dshNoOpenSupported;
+// 认证引导提示的上次弹出时间（冷却，避免反复打扰）。
+let lastAuthPromptAt = 0;
+// 标签页模式的重载函数（供认证引导完成后重新渲染标签页）。
+let tabReloadFn = null;
 
 /**
  * 读取配置。
@@ -78,6 +97,27 @@ function runCommandOk(cmd, args, timeoutMs = 15000) {
       try { child.kill(); } catch (_) { /* noop */ }
       finish(false);
     }, timeoutMs);
+  });
+}
+
+/**
+ * 执行命令并捕获 stdout（用于探测 dsh 能力，如 `dsh web --help`）。
+ * @param {string} cmd
+ * @param {string[]} args
+ * @param {number} timeoutMs
+ * @returns {Promise<string>} stdout（失败抛错）
+ */
+function runCommandOutput(cmd, args, timeoutMs = 12000) {
+  return new Promise((resolve, reject) => {
+    const quoted = /\s/.test(cmd) ? `"${cmd}"` : cmd;
+    exec(`${quoted} ${args.join(' ')}`, {
+      timeout: timeoutMs,
+      windowsHide: true,
+      maxBuffer: 1024 * 1024
+    }, (err, stdout) => {
+      if (err) reject(err);
+      else resolve(String(stdout || ''));
+    });
   });
 }
 
@@ -262,11 +302,14 @@ function httpPostJson(url, payload, timeoutMs = 5000) {
       let body = '';
       res.on('data', (c) => { body += c; });
       res.on('end', () => {
+        let out;
         try {
-          resolve(JSON.parse(body));
+          out = JSON.parse(body);
         } catch {
-          resolve({ raw: body });
+          out = { raw: body };
         }
+        out.__httpStatus = res.statusCode;
+        resolve(out);
       });
     });
     req.on('error', reject);
@@ -320,7 +363,7 @@ function stripCopilotContext(t) {
 
 /**
  * 把 VS Code 当前工作区注册到 DSH 的工作区列表。
- * workspace.create 是幂等的：已存在时返回现有记录，不会重复。
+ * workspace/create 是幂等的：已存在时返回现有记录，不会重复。
  * 尽力而为，失败不影响面板渲染。
  * @returns {Promise<boolean>}
  */
@@ -328,27 +371,547 @@ async function registerWorkspace() {
   if (!cfg().get('dshPanel.autoRegisterWorkspace', true)) {
     return false;
   }
-  const base = getUrl().replace(/\/+$/, '');
-  const path = getWorkspaceDir();
-  const payload = {
-    type: 'client-request',
-    rpcId: 'vscode-' + Date.now().toString(36),
-    method: 'workspace.create',
-    payload: { path }
-  };
   try {
-    const resp = await httpPostJson(base + '/api/workspace.create', payload);
-    return !!(resp && resp.result && resp.result.ok);
+    const base = await apiBase();
+    const value = await dshRpc(base, 'workspace.create', { path: getWorkspaceDir() }, 8000);
+    return !!value;
   } catch {
     return false;
   }
 }
 
+// =====================================================================
+// dsh web 浏览器认证（dsh 0.1.2-rc 起新增）与本地受管认证代理
+// ---------------------------------------------------------------------
+// 新版 dsh web 每次启动都会生成一个「进程启动令牌」，并往 stdout 打印形如
+//   dsh web: http://127.0.0.1:3080/?token=<64位令牌>
+// 的认证链接；浏览器打开该链接时，服务器用令牌换取 `HttpOnly; SameSite=Strict`
+// 的签名 Cookie（绑定请求 Host），此后所有请求凭 Cookie 通过；裸地址一律 401。
+// /api 另有浏览器信任围栏：Host 必须回环（或受信）、Origin 必须与 Host 一致、
+// 拒绝跨站 sec-fetch-site。
+//
+// webview 里 dsh 页面处于第三方 iframe 上下文，SameSite=Strict 的 Cookie 在
+// 其中无法设置也无法携带，因此「iframe 直接加载 token 链接」不可靠。故改为：
+// 扩展捕获 stdout 里的令牌链接，在本机回环随机端口启动「认证代理」，由代理
+// 完成令牌→Cookie 换发，随后给每个转发请求注入 Cookie 与 Host。webview 与
+// 扩展自身的 /api 调用全部改走代理——不关闭 dsh 任何安全机制，全程无感。
+// =====================================================================
+
+const AUTH_PROXY_STATE_KEY = 'dsh.webAuth.tokenCache';
+
+/** 是否为本地（非 Remote）且 dshPanel.url 指向回环地址的场景。 */
+function isLocalLoopbackTarget() {
+  try {
+    if (vscode.env && vscode.env.remoteName) return false;
+    const u = new URL(getUrl());
+    return ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** 与 dsh 服务端一致的 Host 归一化：new URL('http://' + host).host。 */
+function normAuthority(hostHeader) {
+  try {
+    return new URL('http://' + String(hostHeader || '')).host;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 从认证链接或裸令牌字符串中提取 token 参数值。 */
+function extractTokenParam(input) {
+  const s = String(input || '').trim();
+  if (/^[A-Za-z0-9_.\-]{16,}$/.test(s)) return s; // 本身就是令牌
+  const m = s.match(/[?&]token=([A-Za-z0-9_.\-]+)/);
+  return m ? m[1] : null;
+}
+
+/**
+ * 学习/更新 dsh 启动令牌（来自 stdout 行或用户粘贴的认证链接）。
+ * 更新后立即为代理的本机来源（127.0.0.1 / localhost）静默换发 Cookie，
+ * 并把令牌缓存进 globalState，供其他 VS Code 窗口 / 重载后复用（免打扰）。
+ * @param {string} tokenOrUrl
+ * @returns {boolean} 是否成功提取到令牌
+ */
+/** 记录/持久化 dsh 的 web 认证能力（true=支持，false=老版无认证）。 */
+function setDshAuthCapable(value) {
+  dshAuthCapable = value;
+  if (gContext) {
+    gContext.globalState.update('dsh.authCapable', value).then(() => {}, () => {});
+  }
+}
+
+function learnDshToken(tokenOrUrl) {
+  const token = extractTokenParam(tokenOrUrl);
+  if (!token) return false;
+  dshLaunchToken = token;
+  if (dshAuthCapable !== true) {
+    setDshAuthCapable(true);
+  }
+  if (gContext) {
+    gContext.globalState.update(AUTH_PROXY_STATE_KEY, {
+      target: getUrl(),
+      token: token,
+      ts: Date.now()
+    }).then(() => {}, () => {});
+  }
+  if (authProxy) authProxy.onToken(token);
+  return true;
+}
+
+/**
+ * 确保本地受管认证代理已启动（127.0.0.1 随机端口，仅本机可访问）。
+ * Remote 场景或目标非回环地址时返回 null（维持原直连行为）。
+ * @returns {Promise<object|null>}
+ */
+async function ensureAuthProxy() {
+  if (!isLocalLoopbackTarget()) return null;
+  if (authProxy) {
+    if (authProxy.target() !== getUrl()) {
+      // 目标被改配置：旧 Cookie/令牌对新实例无效，整组重建。
+      const old = authProxy;
+      authProxy = null;
+      authProxyPromise = null;
+      await old.close().catch(() => {});
+    } else {
+      return authProxy;
+    }
+  }
+  if (authProxyPromise) return authProxyPromise;
+  authProxyPromise = (async () => {
+    let proxy;
+    try {
+      proxy = await createAuthProxy(getUrl());
+    } catch (e) {
+      console.error('[DeepSeek Harness] 认证代理启动失败，回退直连：', e);
+      return null;
+    }
+    authProxy = proxy;
+    // 优先复用其他窗口/上次会话缓存的令牌与认证能力标记，尽量无感。
+    if (gContext) {
+      try {
+        if (dshAuthCapable === undefined) {
+          const cap = gContext.globalState.get('dsh.authCapable');
+          if (typeof cap === 'boolean') dshAuthCapable = cap;
+        }
+      } catch { /* 忽略缓存读取失败 */ }
+    }
+    if (!dshLaunchToken && gContext) {
+      try {
+        const cache = gContext.globalState.get(AUTH_PROXY_STATE_KEY);
+        if (cache && cache.target === getUrl() && cache.token) {
+          dshLaunchToken = cache.token;
+        }
+      } catch { /* 忽略缓存读取失败 */ }
+    }
+    if (dshLaunchToken) proxy.onToken(dshLaunchToken);
+    return proxy;
+  })();
+  const result = await authProxyPromise;
+  if (result === null) authProxyPromise = null; // 失败允许下次重试
+  return result;
+}
+
+/**
+ * 创建认证代理 HTTP 服务器：
+ * - 监听 127.0.0.1 随机端口（localhost 亦可访问，服务于标签页 origin 隔离）；
+ * - 每个来源 authority（请求 Host）独立持有换取到的签名 Cookie；
+ * - 转发时注入 Host 与 Cookie；遇 401 且持有令牌时自动重换并重试一次；
+ * - 响应剥离 Set-Cookie（Cookie 由代理持有，不进 webview 第三方上下文）；
+ * - WebSocket 升级按原头转发并双向透传（注入 Host/Cookie）。
+ * @param {string} targetUrl dsh web 服务地址
+ * @returns {Promise<object>} 代理句柄
+ */
+function createAuthProxy(targetUrl) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(targetUrl);
+    const targetPort = Number(target.port) || (target.protocol === 'https:' ? 443 : 80);
+    const cookies = new Map(); // authority -> 'name=value'
+    const exchanges = new Map(); // authority -> Promise（并发去重）
+    let token = null;
+    let port = 0;
+
+    /** 为指定 authority 换发 Cookie（GET /?token=，Host 指向代理自身 authority）。 */
+    function exchangeFor(authority) {
+      const key = normAuthority(authority) || String(authority);
+      if (!token) return Promise.resolve(null);
+      const inFlight = exchanges.get(key);
+      if (inFlight) return inFlight;
+      const p = new Promise((done) => {
+        const req = http.request({
+          hostname: target.hostname,
+          port: targetPort,
+          path: '/?token=' + encodeURIComponent(token),
+          method: 'GET',
+          headers: { host: key, connection: 'close', accept: '*/*' }
+        }, (res) => {
+          res.resume();
+          let cookieValue = null;
+          const setCookies = res.headers['set-cookie'];
+          if (res.statusCode === 303 && Array.isArray(setCookies) && setCookies.length > 0) {
+            const raw = setCookies[0];
+            const eq = raw.indexOf('=');
+            const semi = raw.indexOf(';');
+            if (eq > 0 && (semi < 0 || semi > eq)) cookieValue = raw.slice(0, semi < 0 ? raw.length : semi).trim();
+          }
+          if (cookieValue) cookies.set(key, cookieValue);
+          done(cookieValue);
+        });
+        req.on('error', () => done(null));
+        req.setTimeout(5000, () => req.destroy(new Error('auth exchange timeout')));
+        req.end();
+      }).finally(() => exchanges.delete(key));
+      exchanges.set(key, p);
+      return p;
+    }
+
+    /** 令牌到位后为两个本机来源静默预换 Cookie。 */
+    async function preAuth() {
+      if (!token) return;
+      await Promise.all([
+        exchangeFor(`127.0.0.1:${port}`),
+        exchangeFor(`localhost:${port}`)
+      ]).catch(() => {});
+    }
+
+    /** 无 Cookie 时的鉴权探测：直接访问上游首页的状态码（401 = 需认证）。 */
+    function probeIndexStatus(timeoutMs = 4000) {
+      return new Promise((done) => {
+        try {
+          const req = http.request({
+            hostname: target.hostname,
+            port: targetPort,
+            path: '/',
+            method: 'GET',
+            headers: { accept: '*/*' }
+          }, (res) => {
+            res.resume();
+            done(res.statusCode || 0);
+          });
+          req.on('error', () => done(0));
+          req.setTimeout(timeoutMs, () => { req.destroy(); done(0); });
+          req.end();
+        } catch {
+          done(0);
+        }
+      });
+    }
+
+    /** 端到端自检：请求代理自身首页（走完整转发链），200 即「webview 可用」。 */
+    function probeSelf(timeoutMs = 2500) {
+      return new Promise((done) => {
+        try {
+          const req = http.get({
+            host: '127.0.0.1',
+            port,
+            path: '/',
+            agent: new http.Agent({ keepAlive: false })
+          }, (res) => {
+            res.resume();
+            done(res.statusCode || 0);
+          });
+          req.on('error', () => done(0));
+          req.setTimeout(timeoutMs, () => { req.destroy(); done(0); });
+        } catch {
+          done(0);
+        }
+      });
+    }
+
+    /** 清理 hop-by-hop 头，注入 Host/Cookie 后转发。 */
+    function buildForwardHeaders(req, authority, cookieValue) {
+      const headers = { ...req.headers };
+      delete headers.host;
+      delete headers.cookie;
+      for (const h of ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailers', 'transfer-encoding', 'upgrade']) {
+        delete headers[h];
+      }
+      headers.host = authority;
+      if (cookieValue) headers.cookie = cookieValue;
+      return headers;
+    }
+
+    /** 普通 HTTP 转发（含 401 自动重换重试一次）。 */
+    async function forward(req, res) {
+      const authority = normAuthority(req.headers.host) || `127.0.0.1:${port}`;
+      let cookie = cookies.get(authority) || null;
+      if (!cookie && token) cookie = await exchangeFor(authority);
+      let status = await attempt(cookie);
+      if (status === 401 && token) {
+        const fresh = await exchangeFor(authority);
+        if (fresh && fresh !== cookie) status = await attempt(fresh);
+      }
+      return status;
+
+      function attempt(cookieValue) {
+        return new Promise((done) => {
+          let settled = false;
+          const finish = (v) => { if (!settled) { settled = true; done(v); } };
+          let upstream;
+          try {
+            upstream = http.request({
+              hostname: target.hostname,
+              port: targetPort,
+              path: req.url,
+              method: req.method,
+              headers: buildForwardHeaders(req, authority, cookieValue)
+            }, (ures) => {
+              if (ures.statusCode === 401) {
+                ures.resume();
+                finish(401);
+                return;
+              }
+              const outHeaders = { ...ures.headers };
+              delete outHeaders['set-cookie'];
+              delete outHeaders['transfer-encoding'];
+              delete outHeaders['connection'];
+              res.writeHead(ures.statusCode || 502, outHeaders);
+              ures.pipe(res);
+              ures.on('end', () => finish(ures.statusCode || 0));
+              ures.on('error', () => finish(ures.statusCode || 0));
+            });
+          } catch {
+            finish(0);
+            return;
+          }
+          upstream.on('error', () => {
+            if (!res.headersSent) {
+              res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+            }
+            try { res.end('DeepSeek Harness 代理：上游 dsh 连接失败'); } catch { /* noop */ }
+            finish(0);
+          });
+          req.on('error', () => { try { upstream.destroy(); } catch { /* noop */ } });
+          req.pipe(upstream);
+        });
+      }
+    }
+
+    /** WebSocket 升级透传（注入 Host/Cookie，原始字节双向转发）。 */
+    function onUpgrade(req, socket, head) {
+      const authority = normAuthority(req.headers.host) || `127.0.0.1:${port}`;
+      const cookie = cookies.get(authority) || null;
+      const headers = { ...req.headers };
+      headers.host = authority;
+      if (cookie) headers.cookie = cookie;
+      const upstream = http.request({
+        hostname: target.hostname,
+        port: targetPort,
+        path: req.url,
+        method: req.method,
+        headers
+      });
+      upstream.on('upgrade', (ures, usocket, uhead) => {
+        try {
+          const lines = [`HTTP/1.1 ${ures.statusCode} ${ures.statusMessage || ''}`.trimEnd()];
+          for (const [k, v] of Object.entries(ures.headers)) {
+            if (Array.isArray(v)) { for (const vv of v) lines.push(`${k}: ${vv}`); }
+            else if (v !== undefined) lines.push(`${k}: ${v}`);
+          }
+          socket.write(lines.join('\r\n') + '\r\n\r\n');
+          if (uhead && uhead.length) usocket.write(uhead);
+          const cleanup = () => {
+            try { socket.destroy(); } catch { /* noop */ }
+            try { usocket.destroy(); } catch { /* noop */ }
+          };
+          socket.on('error', cleanup);
+          usocket.on('error', cleanup);
+          socket.on('close', cleanup);
+          usocket.on('close', cleanup);
+          usocket.pipe(socket);
+          socket.pipe(usocket);
+        } catch {
+          try { socket.destroy(); } catch { /* noop */ }
+        }
+      });
+      upstream.on('response', (ures) => {
+        // 上游拒绝升级（如 401/404）：把状态原样回给客户端。
+        const chunks = [];
+        ures.on('data', (c) => chunks.push(c));
+        ures.on('end', () => {
+          try {
+            socket.write(
+              `HTTP/1.1 ${ures.statusCode} ${ures.statusMessage || ''}\r\n` +
+              'content-type: text/plain; charset=utf-8\r\nconnection: close\r\n\r\n' +
+              Buffer.concat(chunks).toString('utf8')
+            );
+            socket.end();
+          } catch {
+            try { socket.destroy(); } catch { /* noop */ }
+          }
+        });
+      });
+      upstream.on('error', () => { try { socket.destroy(); } catch { /* noop */ } });
+      upstream.end();
+    }
+
+    const server = http.createServer((req, res) => {
+      forward(req, res).catch(() => { try { res.destroy(); } catch { /* noop */ } });
+    });
+    server.on('upgrade', onUpgrade);
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      port = server.address().port;
+      server.removeAllListeners('error');
+      server.on('error', (e) => console.error('[DeepSeek Harness] 认证代理错误：', e));
+      resolve({
+        target: () => targetUrl,
+        port: () => port,
+        baseUrl: () => `http://127.0.0.1:${port}`,
+        urlForTab: () => {
+          const u = new URL(`http://127.0.0.1:${port}`);
+          u.hostname = 'localhost';
+          return u.toString();
+        },
+        hasCookieForBase: () => cookies.has(`127.0.0.1:${port}`),
+        hasCookieForTab: () => cookies.has(`localhost:${port}`),
+        token: () => token,
+        status: () => ({
+          target: targetUrl,
+          proxy: `http://127.0.0.1:${port}`,
+          tokenKnown: !!token,
+          authedAuthorities: [...cookies.keys()]
+        }),
+        /** 供「在浏览器中打开」：携带当前令牌的认证链接（真实浏览器可自行换 Cookie）。 */
+        authenticatedUrl: () => {
+          if (!token) return targetUrl;
+          try {
+            const u = new URL(targetUrl);
+            u.pathname = '/';
+            u.search = '';
+            u.hash = '';
+            u.searchParams.set('token', token);
+            return u.toString();
+          } catch {
+            return targetUrl;
+          }
+        },
+        onToken: (t) => { token = t; preAuth().catch(() => {}); },
+        exchangeFor,
+        probeIndexStatus,
+        probeSelf,
+        /** 等待基础来源（127.0.0.1）的 Cookie 就绪或超时；无令牌时立即返回。 */
+        waitAuthed: (ms = 8000) => new Promise((done) => {
+          if (!token || cookies.has(`127.0.0.1:${port}`)) { done(); return; }
+          const t0 = Date.now();
+          const timer = setInterval(() => {
+            if (cookies.has(`127.0.0.1:${port}`) || Date.now() - t0 > ms) {
+              clearInterval(timer);
+              done();
+            }
+          }, 120);
+        }),
+        close: () => new Promise((done) => {
+          try {
+            server.close(() => done());
+            setTimeout(() => done(), 1500).unref();
+          } catch { done(); }
+        })
+      });
+    });
+  });
+}
+
+/**
+ * 为面板解析最终展示地址：
+ * - 代理可用且 Cookie 就绪 → 代理地址（webview 由此获得无感认证）；
+ * - 代理可用但未认证且上游 401 → { unauthorized: true }（引导接管）；
+ * - 其余（Remote / 非回环 / 老版 dsh 无认证）→ 原直连展示地址。
+ * @param {boolean} isTab 是否标签页模式
+ * @returns {Promise<{displayUrl: string} | {unauthorized: true}>}
+ */
+async function resolvePanelTarget(isTab) {
+  let displayUrl = isTab ? getTabDisplayUrl(await resolveDisplayUrl()) : await resolveDisplayUrl();
+  const proxy = await ensureAuthProxy();
+  if (!proxy) return { displayUrl };
+  await proxy.waitAuthed(8000);
+  if (proxy.hasCookieForBase()) {
+    displayUrl = isTab ? proxy.urlForTab() : proxy.baseUrl();
+    // 端到端就绪确认：代理链路（注入 Cookie → 上游 → 回包）拿到 200 才交给
+    // iframe，避免 dsh 半就绪（端口已监听但插件/连接未加载完）导致首次加载失败。
+    const deadline = Date.now() + 6000;
+    let probeStatus = 0;
+    while (Date.now() < deadline) {
+      probeStatus = await proxy.probeSelf(2500);
+      if (probeStatus === 200) break;
+      await sleep(400);
+    }
+    return { displayUrl };
+  }
+  const status = await proxy.probeIndexStatus();
+  if (status === 401) return { unauthorized: true };
+  return { displayUrl }; // 老版本 dsh（无认证），照旧直连
+}
+
+/**
+ * 认证引导（免打扰策略：仅在确认 401 且无法静默认证时触发，且带 3 分钟冷却）：
+ * 提供两个动作——由扩展受管重启 dsh（自动认证，推荐），或粘贴 dsh web 打印的认证链接。
+ * @param {boolean} isTab
+ */
+function maybeGuideAuth(isTab) {
+  const now = Date.now();
+  if (now - lastAuthPromptAt < 3 * 60 * 1000) return;
+  lastAuthPromptAt = now;
+  vscode.window.showWarningMessage(
+    '新版 dsh web 启用了浏览器认证，当前实例不是由本窗口启动，无法静默认证。',
+    '重启并自动认证（推荐）',
+    '粘贴认证链接'
+  ).then(async (choice) => {
+    if (choice === '重启并自动认证（推荐）') {
+      const ok = await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: '正在重启 dsh web 以完成自动认证…',
+        cancellable: false
+      }, async () => {
+        const installed = await ensureDshInstalled();
+        if (!installed) return false;
+        return restartDsh();
+      });
+      if (ok) {
+        lastAuthPromptAt = 0;
+        if (isTab && tabReloadFn) tabReloadFn();
+        else if (activeView) render(activeView);
+      } else {
+        vscode.window.showErrorMessage('dsh web 重启失败，请手动重启后重试。');
+      }
+    } else if (choice === '粘贴认证链接') {
+      const input = await vscode.window.showInputBox({
+        prompt: '粘贴 dsh web 启动时打印的认证链接（形如 http://127.0.0.1:3080/?token=…，整行粘贴即可）',
+        ignoreFocusOut: true
+      });
+      if (input && learnDshToken(input)) {
+        lastAuthPromptAt = 0;
+        await (authProxy && authProxy.waitAuthed(8000));
+        if (isTab && tabReloadFn) tabReloadFn();
+        else if (activeView) render(activeView);
+      }
+    }
+  });
+}
+
+/** 扩展自身访问 dsh /api 的基址：代理就绪时走代理（自动带认证）。 */
+async function apiBase() {
+  if (isLocalLoopbackTarget()) {
+    const proxy = await ensureAuthProxy();
+    if (proxy) {
+      // Cookie 可能尚未换发完成（dsh 刚启动）：短暂等待，避免打到裸地址吃 401。
+      await proxy.waitAuthed(5000);
+      if (proxy.hasCookieForBase()) {
+        return proxy.baseUrl();
+      }
+    }
+  }
+  return getUrl().replace(/\/+$/, '');
+}
+
 /**
  * 启动 dsh web 进程。Windows 通过 shell 执行以命中 dsh.cmd shim。
- * @returns {import('child_process').ChildProcess}
+ * 兼容新旧版本：--no-open 先经 `dsh web --help` 探测，老版本不支持时不传，
+ * 避免未知参数导致启动失败。
+ * @returns {Promise<import('child_process').ChildProcess>}
  */
-function startDsh() {
+async function startDsh() {
   // 使用 ensureDshInstalled 解析出的启动方式（全局 dsh 或 npx）。
   // 兜底回退到配置的命令，避免异常时序下拿到空值。
   const inv = dshInvocation || { cmd: getDshCommand(), prefix: [] };
@@ -358,13 +921,22 @@ function startDsh() {
     '--host', String(getHost()),
     '--port', String(getPort())
   ];
+  // dsh 0.1.2-rc 起的 web 浏览器认证由扩展自动完成（受管认证代理），
+  // 默认不再弹系统浏览器；需要保留旧行为时打开 dshPanel.openSystemBrowser。
+  // 老版本 dsh 不识别 --no-open：探测支持才传，探测失败按支持处理（仍有回退）。
+  if (!cfg().get('dshPanel.openSystemBrowser', false) && (dshNoOpenBroken !== true)) {
+    if (await dshWebSupportsNoOpen(inv)) {
+      args.push('--no-open');
+    }
+  }
   const child = spawn(inv.cmd, args, {
     cwd: getWorkspaceDir(),
     shell: process.platform === 'win32',
     windowsHide: true,
-    stdio: 'ignore'
+    stdio: ['ignore', 'pipe', 'pipe']
   });
   managedChild = child;
+  attachDshOutputReader(child);
 
   child.on('error', (err) => {
     if (activeView) {
@@ -379,6 +951,64 @@ function startDsh() {
   });
 
   return child;
+}
+
+/**
+ * 探测当前 dsh 的 web 子命令是否支持 --no-open（读 `dsh web --help` 输出）。
+ * 结果按进程缓存；探测异常时按支持处理（保留 dshNoOpenBroken 回退兜底）。
+ * @param {{cmd: string, prefix: string[]}} inv
+ * @returns {Promise<boolean>}
+ */
+async function dshWebSupportsNoOpen(inv) {
+  if (dshNoOpenSupported !== undefined) return dshNoOpenSupported;
+  try {
+    const out = await runCommandOutput(inv.cmd, [...inv.prefix, 'web', '--help'], 12000);
+    dshNoOpenSupported = /--no-open/.test(out);
+  } catch {
+    dshNoOpenSupported = true;
+  }
+  if (dshNoOpenSupported === false) {
+    dshNoOpenBroken = true; // 老版本：不再尝试该参数（等待逻辑也直接跳过认证链接等待）
+  }
+  return dshNoOpenSupported;
+}
+
+/**
+ * 逐行读取 dsh web 的 stdout：
+ * - 捕获「完全启动」信号：任何 `dsh web: <url>` 打印行（新版带 token=，
+ *   老版为纯 URL，都代表 dsh 自身就绪）；
+ * - 带令牌的行交给 learnDshToken（认证代理据此换发 Cookie）；
+ * - 不带令牌的行说明当前 dsh 无 web 认证（老版本），记 dshAuthCapable=false。
+ * stderr 仅记录日志便于排障。
+ * @param {import('child_process').ChildProcess} child
+ */
+function attachDshOutputReader(child) {
+  let buf = '';
+  const onData = (chunk) => {
+    buf += chunk.toString('utf8');
+    let idx;
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx).replace(/\r$/, '');
+      buf = buf.slice(idx + 1);
+      const m = line.match(/dsh web:\s*(\S+)/);
+      if (m) {
+        dshBootAnnouncedAt = Date.now();
+        if (extractTokenParam(m[1])) {
+          learnDshToken(m[1]);
+        } else if (dshAuthCapable !== true) {
+          setDshAuthCapable(false); // 老版 dsh：URL 无 token 参数
+        }
+      }
+    }
+    if (buf.length > 64 * 1024) buf = '';
+  };
+  if (child.stdout) child.stdout.on('data', onData);
+  if (child.stderr) {
+    child.stderr.on('data', (chunk) => {
+      const s = chunk.toString('utf8').trimEnd();
+      if (s) console.error('[dsh web]', s);
+    });
+  }
 }
 
 /**
@@ -418,16 +1048,82 @@ async function ensureRunning() {
     return false;
   }
 
-  startDsh();
+  return startDshAndWaitReady(url);
+}
 
-  // 最多等约 30 秒让服务就绪
+/**
+ * 启动 dsh 并等待就绪（最多约 30 秒）。
+ * 老版本 dsh 可能不识别 --no-open（启动即退出）：自动去掉该参数重试一次。
+ * @param {string} url
+ * @returns {Promise<boolean>}
+ */
+async function startDshAndWaitReady(url) {
+  // 记录启动前的「启动广播」快照：dsh 完全就绪（插件/连接加载完）才会打印
+  // `dsh web: <url>` 行——新版带 token=，老版为纯 URL。端口可达 ≠ 就绪，
+  // 过早渲染 iframe 会让前端在半就绪服务上启动失败（表现为重启后首次
+  // 加载不出来、刷新一次才好）。
+  const announceBefore = dshBootAnnouncedAt;
+  if (!await startDshAndAwaitPort(url)) {
+    return false;
+  }
+  return await waitDshFullBoot(announceBefore);
+}
+
+/** 端口可达即返回（401 也算）；含「探测漏判 --no-open」时的一次去参重试。 */
+async function startDshAndAwaitPort(url) {
+  startDsh().catch(() => {});
   for (let i = 0; i < 60; i++) {
     await sleep(500);
     if (await checkUrl(url)) {
       return true;
     }
   }
+  if (!dshNoOpenBroken && !cfg().get('dshPanel.openSystemBrowser', false)) {
+    // 兜底：探测误判（如 --help 输出异常）导致带参启动失败，去掉参数重试一次。
+    startDsh().catch(() => {});
+    for (let i = 0; i < 60; i++) {
+      await sleep(500);
+      if (await checkUrl(url)) {
+        return true;
+      }
+    }
+  }
   return false;
+}
+
+/**
+ * 等待本次启动的 dsh 打印启动广播行（完全启动信号，新旧版本通用）。
+ * - 「从不广播的安静 dsh」在 globalState 记忆（dsh.quietBoot），之后直接跳过；
+ * - 广播超时的兜底：进程仍存活则放行（渲染前还有代理自检兜底），并记忆
+ *   quietBoot，之后不再等待。
+ * @param {number} announceBefore 启动前的广播时间戳快照
+ * @returns {Promise<boolean>}
+ */
+async function waitDshFullBoot(announceBefore) {
+  if (gContext && gContext.globalState.get('dsh.quietBoot') === true) {
+    return true;
+  }
+  const budget = dshAuthCapable === true ? 30000 : 20000;
+  const deadline = Date.now() + budget;
+  while (Date.now() < deadline) {
+    await sleep(250);
+    if (managedChild === null) {
+      return false; // 启动即退出/被杀
+    }
+    if (dshBootAnnouncedAt !== announceBefore) {
+      // 广播到位；带令牌时认证代理已开始预换 Cookie，稍候片刻。
+      await sleep(300);
+      return true;
+    }
+  }
+  if (managedChild === null) {
+    return false;
+  }
+  // 进程存活但始终没有广播行（极老版本的安静 dsh）：记忆后不再等待。
+  if (gContext) {
+    gContext.globalState.update('dsh.quietBoot', true).then(() => {}, () => {});
+  }
+  return true;
 }
 
 /**
@@ -503,14 +1199,8 @@ async function restartDsh() {
     await sleep(500);
     if (!(await checkUrl(url))) break;
   }
-  // 4. 重新启动。
-  startDsh();
-  // 5. 等待就绪（最多约 30 秒）。
-  for (let i = 0; i < 60; i++) {
-    await sleep(500);
-    if (await checkUrl(url)) return true;
-  }
-  return false;
+  // 4. 重新启动并等待就绪（最多约 30 秒；含 --no-open 兼容回退）。
+  return startDshAndWaitReady(url);
 }
 
 /**
@@ -928,7 +1618,7 @@ function getTabDisplayUrl(displayUrl) {
  * 准备面板内容 HTML：确保 dsh 已安装、配套插件在位、服务就绪，
  * 返回 iframe HTML 或错误。侧边栏视图与编辑器标签页共用。
  * @param {boolean} [isTab] 是否为标签页模式（标签页用不同 origin 以与侧边栏隔离）。
- * @returns {Promise<{ok: true, html: string} | {ok: false, kind: 'not-installed'|'unreachable'|'unloadable', reason: string}>}
+ * @returns {Promise<{ok: true, html: string} | {ok: false, kind: 'not-installed'|'unreachable'|'unloadable'|'unauthorized', reason: string}>}
  */
 async function preparePanelHtml(isTab) {
   // 先确保 dsh 已安装（远程场景即在服务器上检查/安装）。
@@ -959,10 +1649,20 @@ async function preparePanelHtml(isTab) {
 
   // 服务就绪后，尽力把 VSCode 当前工作区注册进 DSH 工作区列表（不阻塞渲染）。
   registerWorkspace().catch(() => {});
-  // iframe 用显示地址（远程场景经端口转发），检测/API 仍用服务地址。
-  const displayUrl = isTab ? getTabDisplayUrl(await resolveDisplayUrl()) : await resolveDisplayUrl();
+  // 解析最终展示地址：本地场景走受管认证代理（无感通过 dsh web 浏览器认证）；
+  // Remote / 非回环 / 老版 dsh（无认证）维持原直连显示地址（远程场景经端口转发）。
+  const target = await resolvePanelTarget(isTab);
+  if (target.unauthorized) {
+    maybeGuideAuth(isTab);
+    return {
+      ok: false,
+      kind: 'unauthorized',
+      reason: 'dsh web 新版启用了浏览器认证，当前实例不是由本窗口启动，无法静默认证。' +
+        '点击面板顶部的「重启 dsh web」，由扩展接管并自动完成认证。'
+    };
+  }
   try {
-    return { ok: true, html: buildIframeHtml(displayUrl, getFontScale()) };
+    return { ok: true, html: buildIframeHtml(target.displayUrl, getFontScale()) };
   } catch (e) {
     // 显示地址无法解析或协议不是 http/https 时，拒绝加载 iframe 并展示错误页。
     return { ok: false, kind: 'unloadable', reason: e.message };
@@ -990,8 +1690,29 @@ async function render(view) {
   view.webview.html = r.html;
 }
 
+// dsh 0.1.2-rc 起把 /api RPC 端点从「点号」改为「命名空间/方法」斜杠规范
+// （如 workspace.create → workspace/create）。这里维护新旧名字映射：
+// 先请求新端点，得到 404（老版本 dsh 无此路由）时自动回退旧点号端点。
+const DSH_RPC_ENDPOINT_RENAME = {
+  'workspace.create': 'workspace/create',
+  'session.create': 'session/create',
+  'session.prompt': 'session/prompt',
+  'session.selectModel': 'session/selectModel',
+  'session.page': 'session/page'
+};
+
+/** 响应是否为「路由不存在」（用于新旧端点回退判断）。 */
+function isRpcRouteMissing(resp) {
+  return !!resp && (resp.__httpStatus === 404 || resp.raw === 'not found');
+}
+
 /**
  * 执行 DSH RPC（client-request 信封），成功返回 result.value，失败抛错。
+ * 兼容两代 dsh：
+ * - 新版（0.1.2-rc.x）：斜杠端点（如 workspace/create），payload 必须为
+ *   「恰好一个普通对象字段」的命名参数包裹 { args: { request: <业务参数> } }；
+ * - 老版本：点号端点（workspace.create），payload 即业务参数本体。
+ * 先按新格式请求，路由不存在（404）时自动回退旧格式。
  * @param {string} base
  * @param {string} method
  * @param {object} payload
@@ -999,13 +1720,30 @@ async function render(view) {
  * @returns {Promise<any>}
  */
 async function dshRpc(base, method, payload, timeoutMs) {
-  const body = {
-    type: 'client-request',
-    rpcId: 'dsh-' + Date.now().toString(36) + '-' + crypto.randomBytes(3).toString('hex'),
-    method,
-    payload
-  };
-  const resp = await httpPostJson(base + '/api/' + method, body, timeoutMs || 15000);
+  const renamed = DSH_RPC_ENDPOINT_RENAME[method];
+  const rpcId = 'dsh-' + Date.now().toString(36) + '-' + crypto.randomBytes(3).toString('hex');
+  const attempts = [];
+  if (renamed) {
+    attempts.push({
+      path: '/api/' + renamed,
+      body: {
+        type: 'client-request',
+        rpcId,
+        method: renamed,
+        payload: { args: { request: payload } }
+      }
+    });
+  }
+  attempts.push({
+    path: '/api/' + method,
+    body: { type: 'client-request', rpcId, method, payload }
+  });
+
+  let resp = null;
+  for (const attempt of attempts) {
+    resp = await httpPostJson(base + attempt.path, attempt.body, timeoutMs || 15000);
+    if (!isRpcRouteMissing(resp)) break;
+  }
   const result = resp && resp.result;
   if (result && result.ok) {
     return result.value;
@@ -1013,6 +1751,52 @@ async function dshRpc(base, method, payload, timeoutMs) {
   const err = result && result.error;
   const msg = (err && (err.message || err.code)) || ('DSH RPC 失败: ' + method);
   throw new Error(msg);
+}
+
+/**
+ * 拉取 DSH 会话历史（供流式回放轮询）。
+ * 新版 dsh（0.1.2-rc.x）端点改名为 session/page，入参变为
+ * { address: {kind:'session', sessionId}, throughSeq, maxMessages }，其中
+ * throughSeq 不可超过会话当前游标（超出时网关报 "past cursor N" 并回带 N）。
+ * 这里先用 0 探测游标，再按游标取尾部一页，并归一化为旧 { events: [...] }
+ * 形态；老版本 dsh 回退 session.history（{sessionId}）。
+ * @param {string} base
+ * @param {string} sid DSH 会话 id
+ * @returns {Promise<{events: any[]}>}
+ */
+async function fetchSessionHistory(base, sid) {
+  const pagePayload = (seq, maxMessages) => ({
+    address: { kind: 'session', sessionId: sid },
+    throughSeq: seq,
+    maxMessages
+  });
+  try {
+    // 1) 游标探测：空会话返回 "past cursor -1"；非空会话 throughSeq=0 总是合法，
+    //    但为了拿到“最新游标”，这里直接解析探测错误的 cursor 值更省一轮——
+    //    因此先用一个必然越界的大值试探，从错误里解析当前游标。
+    let cursor = -1;
+    try {
+      await dshRpc(base, 'session.page', pagePayload(Number.MAX_SAFE_INTEGER, 1), 15000);
+      // 理论不可达（MAX_SAFE_INTEGER 必然越界）；可达时说明没有游标校验，直接按 0 取。
+      cursor = 0;
+    } catch (e) {
+      const m = /past cursor (-?\d+)/.exec(String((e && e.message) || ''));
+      if (!m) throw e;
+      cursor = parseInt(m[1], 10);
+      if (!Number.isFinite(cursor)) cursor = -1;
+    }
+    if (cursor < 0) {
+      return { events: [] }; // 空会话
+    }
+    // 2) 按游标取尾部一页（从最新事件向前回溯 maxMessages 条）。
+    const page = await dshRpc(base, 'session.page', pagePayload(cursor, 4000), 15000);
+    const records = Array.isArray(page && page.records) ? page.records : [];
+    return { events: records.map((x) => (x && x.event) ? x.event : x) };
+  } catch (_) {
+    // 老版本 dsh：旧端点 + 旧入参。
+    const hist = await dshRpc(base, 'session.history', { sessionId: sid }, 15000);
+    return hist;
+  }
 }
 
 
@@ -1231,7 +2015,7 @@ function firstLmQuestionText(messages) {
     const role = m && m.role;
     if (role !== 1 && role !== 'user' && role !== 'User') continue;
     const full = lmMessageText(m);
-    if (full.startsWith('用户：')) return full.slice(3).trim();
+    if (full.startsWith('用户：')) return stripAttachSuffix(full.slice(3));
   }
   return '';
 }
@@ -1242,7 +2026,7 @@ function lastLmUserText(messages) {
     const role = m && m.role;
     if (role !== 1 && role !== 'user' && role !== 'User') continue;
     const full = lmMessageText(m);
-    if (full.startsWith('用户：')) return full.slice(3).trim();
+    if (full.startsWith('用户：')) return stripAttachSuffix(full.slice(3));
   }
   return '';
 }
@@ -1255,7 +2039,7 @@ function prevLmUserText(messages) {
     if (role !== 1 && role !== 'user' && role !== 'User') continue;
     const full = lmMessageText(m);
     if (!full.startsWith('用户：')) continue;
-    const t = full.slice(3).trim();
+    const t = stripAttachSuffix(full.slice(3));
     if (!t) continue;
     seen++;
     if (seen === 2) return t;
@@ -1270,7 +2054,7 @@ function findLmUserIndex(messages, lastUserText) {
     const role = m && m.role;
     if (role !== 1 && role !== 'user' && role !== 'User') continue;
     const full = lmMessageText(m);
-    if (full.startsWith('用户：') && full.slice(3).trim() === lastUserText) return i;
+    if (full.startsWith('用户：') && stripAttachSuffix(full.slice(3)) === lastUserText) return i;
   }
   return -1;
 }
@@ -1285,12 +2069,12 @@ function normalizeFileUserText(u) {
   const raw = String(u || '').trim();
   if (!raw) return '';
   const inner = extractUserRequest(raw);
-  if (inner !== null) return inner;
+  if (inner !== null) return stripAttachSuffix(inner);
   const cleaned = stripCopilotContext(raw);
   if (!cleaned) return '';
   const inner2 = extractUserRequest(cleaned);
-  if (inner2 !== null) return inner2;
-  return cleaned;
+  if (inner2 !== null) return stripAttachSuffix(inner2);
+  return stripAttachSuffix(cleaned);
 }
 
 /**
@@ -1428,6 +2212,84 @@ function stripJunkPrefix(t) {
   return '';
 }
 
+/**
+ * 解析一条「附件消息」（VS Code 把拖进聊天框的文件作为独立的 user 消息投递，
+ * 整条消息形如 <attachment id="...">…文件内容…</attachment>）并提取文件路径。
+ * 路径来源（按优先级）：
+ *  1) 正文 filepath 注释（三种实测变体：<!-- filepath: p --> / // filepath: p / # filepath: p）；
+ *  2) 开标签 filePath/path/uri 属性（file:// URI 归一化为本地路径）；
+ *  3) id 属性（"file:NAME" 或 "NAME"，仅文件名——拼接当前工作区路径，找不到就原样传）。
+ * 注意不能用「<attachment …>…</attachment>」内部配对正则剥离：文件内容里可能有
+ * 字面 <attachment> 文本（比如拖进本扩展的源码），配对会被内容里的字面量击穿。
+ * @param {string} t 整条消息文本
+ * @returns {string[]}
+ */
+function stripAndExtractAttachments(t) {
+  const s = String(t || '');
+  const paths = [];
+  const push = (p) => { if (p && !paths.includes(p)) paths.push(p); };
+  // 路径提取：优先开标签 filePath 属性（实测主格式 <attachment id=... filePath="...">），
+  // 其次正文 filepath 注释（<!-- --> / // / # 变体），最后 id 属性兜底（拼工作区）。
+  const attrRe = /<attachment\b[^>]*\bfilePath\s*=\s*"([^"]+)"/gi;
+  let m;
+  while ((m = attrRe.exec(s))) push(m[1].trim());
+  if (!paths.length) {
+    const attrRe2 = /<attachment\b[^>]*\b(?:path|uri)\s*=\s*"([^"]+)"/gi;
+    while ((m = attrRe2.exec(s))) {
+      let p = m[1].trim();
+      if (/^file:\/\//i.test(p)) {
+        try { p = decodeURIComponent(new URL(p).pathname); } catch (_) { /* 保持原样 */ }
+        if (process.platform === 'win32' && /^\/[A-Za-z]:/.test(p)) p = p.slice(1);
+      }
+      push(p);
+    }
+  }
+  if (!paths.length) {
+    const cm = s.match(/<!--\s*filepath:\s*([^>\r\n]+?)\s*-->/i)
+      || s.match(/(?:^|\n)\s*(?:\/\/|#)\s*filepath:\s*(.+?)(?:\r?\n|$)/i);
+    if (cm) push(cm[1].trim());
+  }
+  if (!paths.length) {
+    const im = s.match(/<attachment\b[^>]*\bid\s*=\s*"([^"]+)"/i);
+    if (im) {
+      let name = im[1].trim().replace(/^file:/i, '').replace(/^active editor:/i, '').trim();
+      if (name && !/^[A-Za-z]:[\\/]/.test(name) && !/^[\\/]/.test(name)) {
+        const ws = getWorkspaceDir();
+        if (ws) name = path.join(ws, name);
+      }
+      push(name);
+    }
+  }
+  // 容器剥离：优先 <attachments>…</attachments>（复数包裹是 VS Code 专用，
+  // 文件内容里几乎不可能出现 </attachments>，可安全取最后一个）；
+  // 回退 <attachment>…</attachment>（首个开标签到最后一个闭标签，内容里的
+  // 字面 <attachment> 文本位于中间，不影响首尾定位）。
+  let cleaned = s;
+  const a1 = s.search(/<attachments\b/i);
+  const z1 = s.lastIndexOf('</attachments>');
+  if (a1 >= 0 && z1 > a1) {
+    cleaned = s.slice(0, a1) + s.slice(z1 + '</attachments>'.length);
+  } else {
+    const a2 = s.search(/<attachment\b/i);
+    const z2 = s.lastIndexOf('</attachment>');
+    if (a2 >= 0 && z2 > a2) {
+      cleaned = s.slice(0, a2) + s.slice(z2 + '</attachment>'.length);
+    }
+  }
+  return { cleaned: cleaned.trim(), paths };
+}
+
+/**
+ * 身份键清洗：把「用户：提问」末尾的【文件引用】段截掉，
+ * 让 lastLmUserText/prevLmUserText/findLmUserIndex 等身份判定只比对真实提问文本。
+ * @param {string} t
+ * @returns {string}
+ */
+function stripAttachSuffix(t) {
+  const idx = String(t || '').indexOf('\n\n【文件引用】');
+  return idx >= 0 ? t.slice(0, idx).trim() : t;
+}
+
 function lmMessageText(m) {
   const role = m && m.role;
   const isUser = role === 'user' || role === 1 || role === 'User';
@@ -1453,35 +2315,47 @@ function lmMessageText(m) {
   if (isUser) {
     // 环境/工作区快照消息：整条丢弃（DSH 有实时文件访问，静态快照无用；尾注也是 VS Code 元信息）
     if (/^\s*<(environment_info|workspace_info)>/.test(text)) return '';
+    // 文件引用处理：VS Code 把拖进聊天框的文件以 <attachments>/<attachment> 容器包裹在
+    // user 消息里（独立消息或与 <userRequest> 提问同消息两种形态均有）。统一先剥离
+    // 附件容器、提取 filePath 路径，再对剩余文本走提问解析——只透传路径不传内容。
+    const noInstr0 = text.replace(/<instructions>[\s\S]*?<\/instructions>/gi, '').trim();
+    const { cleaned: noAttach, paths: attachPaths } = stripAndExtractAttachments(noInstr0);
+    const attachSuffix = attachPaths.length ? ('\n\n【文件引用】\n' + attachPaths.map((p) => '- ' + p).join('\n')) : '';
+    if (!noAttach) {
+      // 整条消息只有附件：输出引用块（不带「用户：」前缀，身份键会自动跳过，
+      // 引用块与其后真正的问题消息一起序列化发给 DSH）
+      return attachPaths.length ? ('【文件引用】\n' + attachPaths.map((p) => '- ' + p).join('\n')) : '';
+    }
+    text = noAttach; // 后续解析都基于剥离附件后的文本，文件内容绝不透传
     // 保留 Copilot 独有记忆（userMemory/sessionMemory/repoMemory 的正文，去掉 XML 包装）
     const memText = extractMemoryBlocks(text);
     if (memText) {
       const rest = text.replace(/<(userMemory|sessionMemory|repoMemory)>\s*[\s\S]*?\s*<\/\1>/g, '').trim();
       if (rest) {
         const innerQ = extractUserRequest(rest);
-        return '【Copilot 记忆】\n' + memText + '\n\n用户：' + (innerQ !== null ? innerQ : rest);
+        return '【Copilot 记忆】\n' + memText + '\n\n用户：' + (innerQ !== null ? innerQ : rest) + attachSuffix;
       }
-      return '【Copilot 记忆】\n' + memText;
+      return '【Copilot 记忆】\n' + memText + attachSuffix;
     }
     // 优先提取 <userRequest> / <prompt> 内的真实提问（VS Code 会把提问包在 <prompt> 里，
     // 前面是 instructions/AGENTS.md 等上下文——只保留提问本身，避免污染会话与身份键）
     const inner = extractUserRequest(text);
-    if (inner !== null) return '用户：' + inner;
+    if (inner !== null) return '用户：' + inner + attachSuffix;
     // 剥掉 Copilot instructions 前置说明与 <instructions> 块后，若还有真实内容则继续
     const cleaned = stripCopilotContext(text);
     if (cleaned !== text) {
       if (!cleaned) return ''; // 纯 instructions/上下文 → 丢弃
       text = cleaned;
       const inner2 = extractUserRequest(text);
-      if (inner2 !== null) return '用户：' + inner2;
+      if (inner2 !== null) return '用户：' + inner2 + attachSuffix;
     }
     // 垃圾块开头：剥离前缀保留尾部真实内容，而不是整条丢弃
     if (isJunkUserText(text)) {
       const stripped = stripJunkPrefix(text);
-      if (stripped) return '用户：' + stripped;
+      if (stripped) return '用户：' + stripped + attachSuffix;
       return '';
     }
-    return '用户：' + text;
+    return '用户：' + text + attachSuffix;
   }
   // 助手消息：剥掉我们上一轮发出的「⏳ 已提交给 DeepSeek Harness…」占位前缀，
   // 避免它作为对话上下文回传给 DSH（保留其后真正的回答内容）
@@ -1496,6 +2370,12 @@ function lmMessageText(m) {
         text = '';
       }
     }
+  }
+  // 助手消息里的 VS Code 注入块（<system-reminder> 等）：剥离前缀只留回答正文，
+  // 避免 system 提示词作为「已答内容」重复回传给 DSH
+  {
+    const sm = text.match(/<system-reminder>[\s\S]*?<\/system-reminder>\s*/i);
+    if (sm) text = text.replace(sm[0], '');
   }
   if (!text.trim()) return '';
   return '助手：' + text;
@@ -1553,16 +2433,23 @@ function findDshKnownBoundary(messages, lastUserText) {
   for (let i = (messages || []).length - 1; i >= 0; i--) {
     if (isDshProducedAnswer(messages[i])) return i;
   }
+  // 辅信号（无 ⏳ 标记时兜底）：从末尾扫描所有与 lastUserText 同文本的提问，
+  // 取第一个「其后紧跟 assistant」的——支持用户重复提问同一文本的场景
+  //（最后一次提问尚无答案，会被跳过，取上一组问答的答案为边界）。
   if (lastUserText) {
-    const idx = findLmUserIndex(messages, lastUserText);
-    if (idx >= 0) {
-      for (let j = idx + 1; j < (messages || []).length; j++) {
-        const m = messages[j];
-        const role = m && m.role;
-        const isUser = role === 'user' || role === 1 || role === 'User';
-        const isAssistant = role === 'assistant' || role === 2 || role === 'Assistant';
+    for (let i = (messages || []).length - 1; i >= 0; i--) {
+      const m = messages[i];
+      const role = m && m.role;
+      if (role !== 1 && role !== 'user' && role !== 'User') continue;
+      const full = lmMessageText(m);
+      if (!full.startsWith('用户：') || stripAttachSuffix(full.slice(3)) !== lastUserText) continue;
+      for (let j = i + 1; j < (messages || []).length; j++) {
+        const mm = messages[j];
+        const r2 = mm && mm.role;
+        const isUser = r2 === 'user' || r2 === 1 || r2 === 'User';
+        const isAssistant = r2 === 'assistant' || r2 === 2 || r2 === 'Assistant';
         if (isAssistant) return j;
-        if (isUser) break; // 答案被编辑/丢失 → 不视为已知
+        if (isUser) break; // 答案被编辑/丢失 → 该组问答不完整，继续找更早的同文本提问
       }
     }
   }
@@ -1578,9 +2465,17 @@ function findDshKnownBoundary(messages, lastUserText) {
 function serializeLmMessages(messages, opts) {
   const markForeign = !!(opts && opts.markForeignAssistant);
   const out = [];
+  const emittedBlocks = new Set();
   for (const m of messages || []) {
     const s = lmMessageText(m);
     if (!s) continue;
+    if (s.startsWith('【文件引用】')) {
+      // 引用块消息：跨消息去重——VS Code 会把同一文件以 active file 与附件各传一次
+      if (emittedBlocks.has(s)) continue;
+      emittedBlocks.add(s);
+      out.push(s);
+      continue;
+    }
     if (markForeign && s.startsWith('助手：')) {
       out.push('【Copilot 其他模型回答】' + s);
     } else {
@@ -1624,7 +2519,7 @@ async function replayDshAnswer(base, sid, timeoutMs, progress, token) {
   let lastSeq = 0;
   let started = false;
   try {
-    const pre = await dshRpc(base, 'session.history', { sessionId: sid }, 15000);
+    const pre = await fetchSessionHistory(base, sid);
     const events = (pre && Array.isArray(pre.events)) ? pre.events : [];
     for (const item of events) {
       const e = item && item.event ? item.event : item;
@@ -1636,7 +2531,7 @@ async function replayDshAnswer(base, sid, timeoutMs, progress, token) {
     if (token.isCancellationRequested) return;
     let hist;
     try {
-      hist = await dshRpc(base, 'session.history', { sessionId: sid }, 15000);
+      hist = await fetchSessionHistory(base, sid);
     } catch (_) { return; }
     const events = (hist && Array.isArray(hist.events)) ? hist.events : [];
     let ended = false;
@@ -1674,7 +2569,7 @@ async function replayDshAnswer(base, sid, timeoutMs, progress, token) {
  * @returns {Promise<void>}
  */
 async function handleDshModelRequest(model, messages, options, progress, token) {
-  const base = getUrl().replace(/\/+$/, '');
+  const base = await apiBase();
   // 解析模型选择：dsh-deepseek-* 固定映射 DeepSeek 官方模型；dsh 条目跟随 VS Code 配置
   const fixed = resolveDshModelSelection((model && model.id) || 'dsh');
   const provider = fixed ? fixed.provider : cfg().get('dshPanel.chatProvider', '');
@@ -1841,13 +2736,30 @@ async function handleDshModelRequest(model, messages, options, progress, token) 
         }
       }
     }
+    // 当前提问（最后一条用户消息）的附件签名：引用变化说明带来了新文件，
+    // 不属于「同一提问的重复投递」，必须放行发送（否则新拖的文件永远发不出去）。
+    // 只取最后一条用户消息——裸提问/带上下文两次投递的 history 序列化可能不同，
+    // 全对话拼接会误伤去重（此前 v0.8.30 的教训）。
+    let currentAttachSig = '';
+    for (let i = (messages || []).length - 1; i >= 0; i--) {
+      const mm = messages[i];
+      const r2 = mm && mm.role;
+      if (r2 !== 1 && r2 !== 'user' && r2 !== 'User') continue;
+      const s = lmMessageText(mm);
+      if (s) {
+        const ai = s.indexOf('【文件引用】');
+        if (ai >= 0) currentAttachSig = s.slice(ai);
+        break;
+      }
+    }
     // 去重：VS Code 会把同一次提问投递两次（「裸提问」+「instructions+<prompt>提问」），
-    // 归一化后 currentPrompt 相同；若该会话已有进行中/已完成的同题回合，直接返回空，
-    // 避免 DSH 出现两个会话或同题重复提交。
+    // 归一化后 currentPrompt 相同且附件签名一致；此时若该会话已有进行中/已完成的同题
+    // 回合（20 秒内），直接回放答案，避免 DSH 出现两个会话或同题重复提交。
     if (entry && entry.dshSessionId && entry.workspacePath === workspacePath
       && entry.lastUserText === currentPrompt
+      && (entry.lastAttachSig || '') === currentAttachSig
       && (entry.pending || entry.completed)
-      && entryFresh(entry, 60 * 1000)) {
+      && entryFresh(entry, 20 * 1000)) {
       await replayDshAnswer(base, entry.dshSessionId, Number(cfg().get('dshPanel.chatTimeoutMs', 900000)) || 900000, progress, token);
       return;
     }
@@ -1861,7 +2773,7 @@ async function handleDshModelRequest(model, messages, options, progress, token) 
       // 切走期间其他模型的问答（外来段）+ 当前提问是 DSH 唯一缺失的信息，补发并打产地标签。
       const boundary = findDshKnownBoundary(messages, entry.lastUserText);
       if (boundary >= 0) {
-        const delta = serializeLmMessages((messages || []).slice(boundary + 1), { markForeignAssistant: true });
+        const delta = serializeLmMessages((messages || []).slice(boundary + 1), { markForeignAssistant: cfg().get('dshPanel.markForeignAssistant', true) });
         if (delta.trim()) taskText = delta;
       } else {
         // 兜底：找不到产地标记（历史被编辑等）→ 退化为「上次已发提问之后」的增量
@@ -1892,6 +2804,7 @@ async function handleDshModelRequest(model, messages, options, progress, token) 
       }
     }
     entry.lastUserText = currentPrompt;
+    entry.lastAttachSig = currentAttachSig;
     entry.pending = true;
     entry.completed = false;
     entry.lastUsedAt = Date.now();
@@ -1903,7 +2816,7 @@ async function handleDshModelRequest(model, messages, options, progress, token) 
     let lastSeq = 0;
     let started = false;
     try {
-      const pre = await dshRpc(base, 'session.history', { sessionId: sid }, 15000);
+      const pre = await fetchSessionHistory(base, sid);
       const preEvents = (pre && Array.isArray(pre.events)) ? pre.events : [];
       for (const item of preEvents) {
         const e = item && item.event ? item.event : item;
@@ -1912,6 +2825,7 @@ async function handleDshModelRequest(model, messages, options, progress, token) 
     } catch (_) { /* 读不到游标从 0 开始 */ }
 
     await dshRpc(base, 'session.prompt', {
+      requestId: 'vscode-' + Date.now().toString(36) + '-' + crypto.randomBytes(4).toString('hex'),
       sessionId: sid,
       mode: 'queue',
       content: [{ type: 'text', text: taskText }]
@@ -1928,7 +2842,7 @@ async function handleDshModelRequest(model, messages, options, progress, token) 
       }
       let hist;
       try {
-        hist = await dshRpc(base, 'session.history', { sessionId: sid }, 15000);
+        hist = await fetchSessionHistory(base, sid);
       } catch (e) {
         entry.pending = false;
         try { await gContext.globalState.update(DSH_MODEL_MAP_KEY, map); } catch (_) {}
@@ -2166,12 +3080,32 @@ async function showChatStatus() {
   const lines = [
     'DeepSeek Harness DSH 状态',
     'DSH 服务可达: ' + (reachable ? '是 (' + getUrl() + ')' : '否'),
+    'Web 认证: ' + (await authStatusText()),
     'dsh 语言模型提供方: ' + (dshModelProviderRegistered ? '已注册（模型选择器可见）' : '未注册'),
     '模型配置: provider=' + (provider || '(跟随 DSH 默认)') + ' / model=' + (model || '(跟随 DSH 默认)'),
     '推理档位: ' + (effort || '(跟随 DSH 默认)'),
     '已映射聊天数: ' + Object.keys(gContext.globalState.get(DSH_MODEL_MAP_KEY) || {}).length
   ];
   vscode.window.showInformationMessage(lines.join('\n'), { modal: false });
+}
+
+/**
+ * 生成认证状态的诊断文本（「DSH 状态」命令用）。
+ * @returns {Promise<string>}
+ */
+async function authStatusText() {
+  const proxy = await ensureAuthProxy();
+  if (!proxy) {
+    return '未启用受管认证代理（Remote 场景或目标非回环地址），面板走直连';
+  }
+  const s = proxy.status();
+  if (proxy.hasCookieForBase()) {
+    return '已认证（受管代理 ' + s.proxy + '）';
+  }
+  if (!s.tokenKnown) {
+    return '未认证（尚未捕获 dsh 启动令牌；若 dsh 正在运行且返回 401，请重启 dsh web 由扩展接管）';
+  }
+  return '令牌已捕获，Cookie 换发中/失败（代理 ' + s.proxy + '）';
 }
 
 function activate(context) {
@@ -2231,6 +3165,7 @@ function activate(context) {
       { enableScripts: true, retainContextWhenHidden: true }
     );
     activeTab = panel;
+    tabReloadFn = reloadTab;
     // 标签页接管 DSH：侧边栏若已打开则改为占位，避免双 webview 同时加载 DSH 互斥。
     if (activeView) {
       activeView.description = '在标签页中打开';
@@ -2265,6 +3200,7 @@ function activate(context) {
       disposed = true;
       cfgSub.dispose();
       if (activeTab === panel) activeTab = null;
+      if (tabReloadFn === reloadTab) tabReloadFn = null;
       // 标签页关闭后，恢复侧边栏（若侧边栏仍存在）。
       if (activeView) {
         render(activeView);
@@ -2285,8 +3221,15 @@ function activate(context) {
     }
   });
 
-  const openBrowserCmd = vscode.commands.registerCommand('dshPanel.openInBrowser', () => {
-    vscode.env.openExternal(vscode.Uri.parse(getUrl()));
+  const openBrowserCmd = vscode.commands.registerCommand('dshPanel.openInBrowser', async () => {
+    // 新版 dsh web 有浏览器认证：优先打开携带启动令牌的认证链接（真实浏览器
+    // 顶层导航可正常换取 Cookie）；无令牌时退回裸地址。
+    let url = getUrl();
+    const proxy = await ensureAuthProxy();
+    if (proxy && proxy.token()) {
+      url = proxy.authenticatedUrl();
+    }
+    vscode.env.openExternal(vscode.Uri.parse(url));
   });
 
   const restartCmd = vscode.commands.registerCommand('dshPanel.restart', async () => {
@@ -2325,11 +3268,17 @@ function activate(context) {
     if (activeView !== view) return;
     if (ok) {
       registerWorkspace().catch(() => {});
-      const displayUrl = await resolveDisplayUrl();
+      const target = await resolvePanelTarget(false);
       if (activeView !== view) return;
+      if (target.unauthorized) {
+        maybeGuideAuth(false);
+        view.description = '等待认证';
+        view.webview.html = buildErrorHtml('dsh web 需要浏览器认证，且当前实例无法静默认证。请查看通知提示完成接管或粘贴认证链接。');
+        return;
+      }
       view.description = getUrl();
       try {
-        view.webview.html = buildIframeHtml(displayUrl, getFontScale());
+        view.webview.html = buildIframeHtml(target.displayUrl, getFontScale());
       } catch (e) {
         view.description = '无法加载';
         view.webview.html = buildErrorHtml(e.message);
@@ -2406,6 +3355,23 @@ function deactivate() {
     killTree(managedChild);
     managedChild = null;
   }
+  // 关闭受管认证代理（令牌已缓存进 globalState，下次启动可无感复用）。
+  if (authProxy) {
+    const p = authProxy;
+    authProxy = null;
+    p.close().catch(() => {});
+  }
 }
 
 module.exports = { activate, deactivate };
+
+// 仅供测试钩子使用（打包体积无影响；运行时行为不变）。
+module.exports.__internals = {
+  createAuthProxy,
+  ensureAuthProxy,
+  learnDshToken,
+  extractTokenParam,
+  apiBase,
+  normAuthority,
+  startDshAndWaitReady
+};
