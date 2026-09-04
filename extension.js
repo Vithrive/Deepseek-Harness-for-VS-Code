@@ -1456,10 +1456,9 @@ const DSH_PLUGIN_NAME = 'dsh-drop-caret';
 const DSH_PLUGIN_MIN = '0.2.2';
 const NPMJS_REGISTRY = 'https://registry.npmjs.org/';
 // 内置分发的兼容插件（随扩展文件直接写入 DSH web profile，不经 npm）：
-// 修复 macOS 上 DSH 页面被本扩展以跨源 iframe 内嵌时，复制/粘贴/剪切/全选
-// 快捷键失效的问题（详见 clipboardPluginFiles 内注释）。
+// 修复 macOS 上 DSH 页面被本扩展以跨源 iframe 内嵌时 ⌘C/⌘V/⌘X 失效的问题。
 const CLIPBOARD_PLUGIN_NAME = 'dsh-webview-clipboard';
-const CLIPBOARD_PLUGIN_VERSION = '0.2.0';
+const CLIPBOARD_PLUGIN_VERSION = '0.2.1';
 
 function dshHomeDir() {
   return process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
@@ -1595,29 +1594,21 @@ function tryDshPluginAdd(plugin) {
 /**
  * 生成内置兼容插件 dsh-webview-clipboard 的全部文件内容。
  *
- * 问题（macOS）：面板把 DSH Web GUI 以跨源 iframe 内嵌在
- * VS Code webview 中，macOS 上 ⌘C/⌘V/⌘X/⌘A 的按键虽能到达 DSH 页面，
- * 但 Chromium 对这些按键的「原生默认动作」（复制/粘贴/剪切/全选）在这条
- * iframe 链路上不会发生，VS Code 自己的剪贴板命令又只作用于工作台文档，
- * 于是面板里复制、粘贴全部失效（Windows 原生默认动作正常，无此问题）。
+ * 问题（macOS）：DSH 页面以跨源 iframe 内嵌在 VS Code webview 中时，
+ * ⌘C/⌘V/⌘X 按键虽能到达页面，但浏览器的原生剪贴板默认动作在这条
+ * 链路上不会发生，复制/粘贴/剪切全部失效（Windows 正常）。
  *
- * 修复：DSH 页面内部（经本插件注入）拦截这些组合键，preventDefault 后用
- * document.execCommand('paste'/'copy'/'cut'/'selectAll') 显式执行——该
- * 命令路径不受上述限制，可正确作用于聚焦的可编辑元素 / 当前选区
- * （已在 macOS VS Code webview 中实测验证）。
- *
- * 启用条件（全部满足，均在 DSH 页面本地判定，天然兼容 Remote 场景）：
- *   1. 被 iframe 内嵌（window.parent !== window，普通浏览器打开不启用）
- *   2. macOS（UA / userAgentData / platform 三路判定）
- *   3. 宿主是 Electron 应用（UA 含 "Electron/"；浏览器内嵌 DSH——例如
- *      Chrome 扩展——不启用，保持原生剪贴板行为，避免误伤）
+ * 修复：插件在 DSH 页面内拦截这三个键，preventDefault 后改用
+ * document.execCommand('copy'/'paste'/'cut') 显式执行。其余编辑快捷键
+ * （⌘A/撤销重做/光标移动/删除）原生可用，不做处理。
+ * 仅在「被 Electron 内嵌 + macOS」时启用，其余环境行为不变。
  * @returns {Record<string, string>} 相对路径 → 文件内容
  */
 function clipboardPluginFiles() {
   const pkgJson = JSON.stringify({
     name: CLIPBOARD_PLUGIN_NAME,
     version: CLIPBOARD_PLUGIN_VERSION,
-    description: 'DeepSeek Harness 插件：DSH 页面被 VS Code webview（跨源 iframe）内嵌时，修复 macOS 上复制/粘贴/剪切/全选快捷键失效的问题（改用 execCommand 显式执行剪贴板编辑命令）。由 Deepseek-Harness-for-VS-Code 扩展内置分发。',
+    description: 'DeepSeek Harness 插件：DSH 页面被 VS Code webview（跨源 iframe）内嵌时，修复 macOS 上 ⌘C/⌘V/⌘X 快捷键失效的问题（改用 execCommand 显式执行）。由 Deepseek-Harness-for-VS-Code 扩展内置分发。',
     keywords: ['deepseek', 'harness', 'dsh', 'cordis', 'plugin', 'clipboard', 'webview', 'vscode'],
     type: 'module',
     main: 'lib/index.js',
@@ -1662,22 +1653,11 @@ export function apply(_ctx) {}
   // 否则模板字面量会把 \\/ 折叠成 / 造成注入脚本语法错误（同 buildIframeHtml 的前车之鉴）。
   const clientJs = `// ${CLIPBOARD_PLUGIN_NAME} client bundle (ModuleLoader format)
 //
-// 背景（macOS + VS Code webview）：
-// DSH Web GUI 被扩展以「跨源 iframe」形式内嵌在 VS Code webview 里。
-// 在 macOS 上，按键虽然能到达页面，但 Chromium 对 ⌘C/⌘V/⌘X/⌘A 的
-// 「原生默认动作」（复制/粘贴/剪切/全选）在这条 iframe 链路上不会发生，
-// VS Code 自己的剪贴板命令也只会路由到工作台文档——于是面板里复制、
-// 粘贴全部失效（Windows 上原生默认动作正常，无此问题）。
-//
-// 修复：拦截这些组合键，preventDefault 后改用 document.execCommand(
-// 'paste'/'copy'/'cut'/'selectAll') 显式执行——这条命令路径不受上述限制，
-// 可正确作用于当前聚焦的可编辑元素/当前选区。
-//
-// 启用条件（在 DSH 页面本地判定，天然兼容 Remote 场景）：
-//   1. 被 iframe 内嵌（window.parent !== window；普通浏览器打开不启用）
-//   2. macOS（UA / userAgentData / platform 三路判定）
-//   3. 宿主是 Electron 应用（UA 含 "Electron/"；浏览器内嵌 DSH——例如
-//      Chrome 扩展——不启用，保持原生剪贴板行为，避免误伤）
+// macOS + VS Code webview：DSH 页面以跨源 iframe 内嵌时，⌘C/⌘V/⌘X 的
+// 原生剪贴板默认动作不会发生，复制/粘贴/剪切失效（Windows 正常）。
+// 修复：拦截这三个键，preventDefault 后改用 document.execCommand 显式执行。
+// 其余编辑快捷键原生可用，不做处理，避免与编辑器自身实现冲突。
+// 仅在「被 Electron 内嵌 + macOS」时启用，其余环境行为不变。
 
 window.__ModuleLoader__.load({ id: '${CLIPBOARD_PLUGIN_NAME}', factory: (require) => {
   var module = { exports: {} }
@@ -1708,7 +1688,7 @@ window.__ModuleLoader__.load({ id: '${CLIPBOARD_PLUGIN_NAME}', factory: (require
     return inIframe() && isMac() && inElectron()
   }
 
-  /** 事件目标是否为可编辑元素（本插件处理的键只对它们有意义）。 */
+  /** 事件目标是否为可编辑元素（paste 只对它们有意义）。 */
   function isEditable(el) {
     if (!el || el.nodeType !== 1) return false
     var tag = el.tagName
@@ -1716,131 +1696,30 @@ window.__ModuleLoader__.load({ id: '${CLIPBOARD_PLUGIN_NAME}', factory: (require
     return el.isContentEditable === true
   }
 
-  // ── 光标位置辅助 ─────────────────────────────────────────────
-  function lineStart(v, p) { return v.lastIndexOf('\\n', p - 1) + 1 }
-  function lineEnd(v, p) { var i = v.indexOf('\\n', p); return i === -1 ? v.length : i }
-  /** 词首（向前跳过空白，再跳过非空白）。 */
-  function wordBack(v, p) {
-    var i = p
-    while (i > 0 && /\\s/.test(v.charAt(i - 1))) i--
-    while (i > 0 && !/\\s/.test(v.charAt(i - 1))) i--
-    return i
-  }
-  /** 词尾（向后跳过空白，再跳过非空白）。 */
-  function wordFwd(v, p) {
-    var n = v.length, i = p
-    while (i < n && /\\s/.test(v.charAt(i))) i++
-    while (i < n && !/\\s/.test(v.charAt(i))) i++
-    return i
-  }
-
-  // Shift+移动需要记住「选区锚点」。锚点可能因外部操作（输入/点击/普通移动）过期，
-  // 因此除我们自己处理的位置外，还在 input / focusin / mouseup / 普通按键后刷新锚点。
-  var anchors = new WeakMap()
-  function anchorOf(el) {
-    var a = anchors.get(el)
-    if (a === undefined) a = el.selectionStart === el.selectionEnd ? el.selectionStart : el.selectionEnd
-    return a
-  }
-  function moveCaret(el, pos, shift) {
-    if (shift) {
-      var a = anchorOf(el)
-      el.setSelectionRange(Math.min(a, pos), Math.max(a, pos), pos < a ? 'backward' : 'forward')
-    } else {
-      el.setSelectionRange(pos, pos)
-      anchors.set(el, pos)
-    }
-  }
-  /** 把锚点刷新到目标当前光标（异步一拍，等默认动作完成）。 */
-  function refreshAnchorSoon(el) {
-    setTimeout(function () {
-      try { if (el.isConnected) anchors.set(el, el.selectionStart) } catch (e) { /* ignore */ }
-    }, 0)
-  }
-  function onInput(e) {
-    if (isEditable(e.target)) anchors.set(e.target, e.target.selectionStart)
-  }
-  function onFocusIn(e) {
-    if (isEditable(e.target)) anchors.set(e.target, e.target.selectionStart)
-  }
-  function onMouseUp(e) {
-    if (isEditable(e.target)) refreshAnchorSoon(e.target)
-  }
-
-  // ⌘C/⌘V/⌘X 直接映射 execCommand；其余编辑键在 onKeyDown 内特判。
   function onKeyDown(e) {
-    if (e.defaultPrevented) return                 // DSH 自身已处理，尊重之
+    if (e.defaultPrevented) return                 // 页面自身已处理，尊重之
     if (!enabled()) return
     if (e.isComposing || e.keyCode === 229) return // IME 组合中不干预
     var mod = e.metaKey || e.ctrlKey
-    if (!mod && !e.altKey) {
-      // 普通按键（含输入）：异步刷新锚点，保证 Shift 选区语义正确。
-      if (!e.shiftKey && isEditable(e.target)) refreshAnchorSoon(e.target)
-      return
-    }
-    if (mod && e.altKey) return                    // 混合修饰键不处理，避免误伤
-    var el = e.target
-    var editable = isEditable(el)
-    var k = String(e.key || '')
-    var lower = k.toLowerCase()
-
-    // ── 剪贴板/撤销重做（execCommand 族）──
+    if (!mod || e.altKey || e.shiftKey) return     // 仅裸 ⌘/Ctrl + 字母
+    var lower = String(e.key || '').toLowerCase()
     var cmd = null
-    if (mod && lower === 'v') cmd = 'paste'
-    else if (mod && lower === 'c') cmd = 'copy'
-    else if (mod && lower === 'x') cmd = 'cut'
-    else if (mod && lower === 'a' && !e.shiftKey) cmd = 'selectAll'
-    else if (mod && lower === 'z' && !e.shiftKey) cmd = 'undo'
-    else if (mod && ((e.shiftKey && lower === 'z') || lower === 'y')) cmd = 'redo'
-    if (cmd) {
-      if (cmd === 'paste' && !editable) return
-      e.preventDefault()
-      try {
-        var ok = document.execCommand(cmd)
-        if (editable) anchors.set(el, el.selectionStart)
-        if (!ok) console.warn('[${CLIPBOARD_PLUGIN_NAME}] execCommand("' + cmd + '") returned false')
-      } catch (err) {
-        console.warn('[${CLIPBOARD_PLUGIN_NAME}] execCommand("' + cmd + '") failed:', err)
-      }
-      return
-    }
-
-    // ── 光标移动 / 删除（execCommand 无对应命令，手动计算后走编辑管线）──
-    if (!editable) return
-    if (k !== 'ArrowLeft' && k !== 'ArrowRight' && k !== 'ArrowUp' && k !== 'ArrowDown' && k !== 'Backspace') return
-    var isCmd = mod, isAlt = e.altKey && !mod
-    if (!isCmd && !isAlt) return
-    if (k === 'Backspace' && e.shiftKey) return
-
-    var v = el.value
-    var caret = el.selectionEnd
-
-    if (k === 'Backspace') {
-      // ⌘⌫ 删至行首；⌥⌫ 删除前一个词。先选中区间再走 delete，保持撤销栈完整。
-      var from = isCmd ? lineStart(v, caret) : wordBack(v, caret)
-      if (from >= caret) return
-      el.setSelectionRange(from, caret)
-      e.preventDefault()
-      document.execCommand('delete')
-      anchors.set(el, el.selectionStart)
-      return
-    }
-
-    var target
-    if (k === 'ArrowLeft') target = isCmd ? lineStart(v, caret) : wordBack(v, caret)
-    else if (k === 'ArrowRight') target = isCmd ? lineEnd(v, caret) : wordFwd(v, caret)
-    else if (k === 'ArrowUp') target = 0            // 单行即行首；多行即文首
-    else target = v.length                          // ArrowDown：行尾/文末
-    if (target === caret && !e.shiftKey) { e.preventDefault(); return }
+    if (lower === 'v') cmd = 'paste'
+    else if (lower === 'c') cmd = 'copy'
+    else if (lower === 'x') cmd = 'cut'
+    if (!cmd) return
+    if (cmd === 'paste' && !isEditable(e.target)) return
     e.preventDefault()
-    moveCaret(el, target, e.shiftKey)
+    try {
+      var ok = document.execCommand(cmd)
+      if (!ok) console.warn('[${CLIPBOARD_PLUGIN_NAME}] execCommand("' + cmd + '") returned false')
+    } catch (err) {
+      console.warn('[${CLIPBOARD_PLUGIN_NAME}] execCommand("' + cmd + '") failed:', err)
+    }
   }
 
   function apply() {
     window.addEventListener('keydown', onKeyDown, false)
-    window.addEventListener('input', onInput, true)
-    window.addEventListener('focusin', onFocusIn, true)
-    window.addEventListener('mouseup', onMouseUp, true)
     window.__dshWebviewClipboard = {
       version: PLUGIN_VERSION,
       enabled: enabled(),
@@ -1853,6 +1732,7 @@ window.__ModuleLoader__.load({ id: '${CLIPBOARD_PLUGIN_NAME}', factory: (require
   exports.inject = []
   return module.exports
 } })
+
 `;
 
   return {
