@@ -13,7 +13,7 @@
 
 ## 🙏 致谢
 
-- [Pelapis](https://github.com/Pelapis)——贡献 macOS 面板编辑快捷键修复（内置插件 `dsh-webview-clipboard`，PR #11）。
+- [Pelapis](https://github.com/Pelapis)——贡献 macOS 面板剪贴板快捷键修复并迭代收敛作用域（内置插件 `dsh-webview-clipboard`，PR #11、#14）。
 - [curtainsmall](https://github.com/curtainsmall)——修复面板 iframe 非整数倍缩放的整页模糊（改用 CSS zoom，PR #10）。
 - [anupamme](https://github.com/anupamme)——报告工作区设置注入面，推动子进程调用安全加固（PR #12）。
 
