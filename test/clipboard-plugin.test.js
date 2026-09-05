@@ -60,14 +60,20 @@ for (const js of ['lib/index.js', 'lib/client.js']) {
 
 console.log('[4] 正则转义未被模板字面量折叠（作者标注的前车之鉴）');
 ok(files['lib/client.js'].includes('/Electron\\//'), 'Electron 正则保留反斜杠转义（/Electron\\/ 匹配 "Electron/"）');
-ok(files['lib/client.js'].includes("'\\n'"), "'\\n' 保留转义");
 
 console.log('[5] 激活门与安全阀存在');
 ok(files['lib/client.js'].includes('inIframe()') && files['lib/client.js'].includes('isMac()') && files['lib/client.js'].includes('inElectron()'), '三重激活门（iframe+macOS+Electron）');
 ok(files['lib/client.js'].includes('defaultPrevented'), '尊重 DSH 已处理的按键');
 ok(files['lib/client.js'].includes('229'), 'IME 组合中不干预');
 
-console.log('[6] cordis.patch.yml 结构');
+console.log('[6] 作用域收敛（PR #14）：仅剪贴板三键，不再模拟编辑键');
+ok(files['lib/client.js'].includes("cmd = 'paste'") && files['lib/client.js'].includes("cmd = 'copy'") && files['lib/client.js'].includes("cmd = 'cut'"), '⌘C/⌘V/⌘X 经 execCommand 处理');
+ok(!files['lib/client.js'].includes('selectAll'), '⌘A 不再拦截（原生可用）');
+ok(!files['lib/client.js'].includes("'redo'"), '撤销/重做不再拦截');
+ok(!files['lib/client.js'].includes('setSelectionRange'), '不再手动模拟光标（contentEditable 下 el.value 会崩）');
+ok(!files['lib/client.js'].includes('el.value'), '不再读取 el.value（contentEditable 无此属性）');
+
+console.log('[6b] cordis.patch.yml 结构');
 ok(/-\s*insert:/.test(files['cordis.patch.yml']), 'insert 行存在');
 ok(files['cordis.patch.yml'].includes("name: '" + CLIPBOARD_PLUGIN_NAME + "'"), 'name 与包名一致');
 

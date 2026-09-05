@@ -2,7 +2,7 @@
   "name": "deepseek-harness-vscode",
   "displayName": "DeepSeek Harness for VSCode",
   "description": "DeepSeek Harness (DSH) 的 VS Code 接入：侧边栏/标签页忠实呈现 DSH Web GUI 并自动检测启动，不影响用户对 DSH 本身的页面组织、第三方插件装配等二次开发行为；v0.7.13 起把 DSH 注册为 Copilot 聊天模型「DSH (DeepSeek Harness)、DeepSeek-V4-Pro (DSH)、DeepSeek-V4-Flash (DSH)……」——接收 Copilot 组织好的现成对话、滤除对话内容无关的 prompt、交给 DSH 二次组织、流式回写，旨在利用 DSH 强大的任务编排与工具调用能力，发挥最大性能",
-  "version": "0.8.40",
+  "version": "0.8.41",
   "publisher": "vithrive",
   "license": "MIT",
   "icon": "media/icon.png",
