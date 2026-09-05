@@ -3,7 +3,7 @@ const http = require('http');
 const https = require('https');
 const os = require('os');
 const crypto = require('crypto');
-const { spawn, exec } = require('child_process');
+const { spawn, exec, execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
@@ -98,7 +98,15 @@ function getDshCommand() {
  */
 function runCommandOk(cmd, args, timeoutMs = 15000) {
   return new Promise((resolve) => {
+    // 纵深校验（PR #12 思路）：cmd 来自 getDshCommand()（已净化），此处再拒一次。
+    if (typeof cmd !== 'string' || cmd === '' || SHELL_META_PATTERN.test(cmd)) {
+      resolve(false);
+      return;
+    }
     // 与 startDsh 同规则：含空格且确实是一个存在的文件 → 加引号；多 token 前缀 → shell 分词。
+    // POSIX 上 shell:false 参数按数组直达进程（无解释器、无注入面）；
+    // Windows 上 shell:true 为命中 dsh.cmd shim 所必需（Node ≥18.20 无 shell 执行
+    // .cmd 会抛 EINVAL，CVE-2024-27980 防护），注入面由上方的净化+白名单收敛。
     const cmdText = (process.platform === 'win32' && /\s/.test(cmd) && fs.existsSync(cmd)) ? '"' + cmd + '"' : cmd;
     const child = spawn(cmdText, args, {
       shell: process.platform === 'win32',
@@ -130,16 +138,35 @@ function runCommandOk(cmd, args, timeoutMs = 15000) {
  */
 function runCommandOutput(cmd, args, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
-    // 与 runCommandOk 同规则：存在的文件路径加引号；多 token 前缀由 shell 分词。
-    const quoted = (/\s/.test(cmd) && fs.existsSync(cmd)) ? `"${cmd}"` : cmd;
-    exec(`${quoted} ${args.join(' ')}`, {
-      timeout: timeoutMs,
-      windowsHide: true,
-      maxBuffer: 1024 * 1024
-    }, (err, stdout) => {
-      if (err) reject(err);
-      else resolve(String(stdout || ''));
-    });
+    // 纵深校验（PR #12 思路）：同 runCommandOk。
+    if (typeof cmd !== 'string' || cmd === '' || SHELL_META_PATTERN.test(cmd)) {
+      reject(new Error('命令包含 shell 元字符或为空，已拒绝执行'));
+      return;
+    }
+    if (process.platform === 'win32') {
+      // Windows：dsh 为 .cmd shim，必须经 cmd.exe（无 shell 会 EINVAL/ENOENT，
+      // 见 CVE-2024-27980 防护）；cmd/参数均已净化，含空格文件路径加引号。
+      const quoted = (/\s/.test(cmd) && fs.existsSync(cmd)) ? `"${cmd}"` : cmd;
+      exec(`${quoted} ${args.join(' ')}`, {
+        timeout: timeoutMs,
+        windowsHide: true,
+        maxBuffer: 1024 * 1024
+      }, (err, stdout) => {
+        if (err) reject(err);
+        else resolve(String(stdout || ''));
+      });
+    } else {
+      // POSIX：execFile 无 shell——参数按数组直达进程（采纳 PR #12 的第二层防御：
+      // 即使净化被绕过，元字符也只是字面文件名字符，不会注入）。
+      execFile(cmd, args, {
+        timeout: timeoutMs,
+        windowsHide: true,
+        maxBuffer: 1024 * 1024
+      }, (err, stdout) => {
+        if (err) reject(err);
+        else resolve(String(stdout || ''));
+      });
+    }
   });
 }
 
@@ -940,6 +967,10 @@ async function startDsh() {
   // host/port 均已净化（getHost 白名单 / getPort 整数），cmd 经 sanitizeCommand
   // 拒绝 shell 元字符——Semgrep detect-child-process 指示的 shell:true 在此数据流
   // 下无注入面（win32 需 shell 命中 dsh.cmd shim，POSIX 不经 shell）。
+  // 纵深校验（PR #12 思路）：cmd 来自 getDshCommand()（已净化），此处再拒一次。
+  if (typeof inv.cmd !== 'string' || inv.cmd === '' || SHELL_META_PATTERN.test(inv.cmd)) {
+    throw new Error('dsh 命令包含 shell 元字符或为空，已拒绝启动');
+  }
   const args = [
     ...inv.prefix,
     'web',
@@ -3619,5 +3650,7 @@ module.exports.__internals = {
   sanitizeCommand,
   getHost,
   getPort,
-  getDshCommand
+  getDshCommand,
+  runCommandOk,
+  runCommandOutput
 };
