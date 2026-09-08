@@ -448,10 +448,12 @@ async function registerWorkspace() {
 
 const AUTH_PROXY_STATE_KEY = 'dsh.webAuth.tokenCache';
 
-/** 是否为本地（非 Remote）且 dshPanel.url 指向回环地址的场景。 */
+/** 是否为本地（或 WSL Remote——宿主与 dsh 同机回环）且 dshPanel.url 指向回环地址的场景。 */
 function isLocalLoopbackTarget() {
   try {
-    if (vscode.env && vscode.env.remoteName) return false;
+    // WSL Remote 除外：扩展宿主与 dsh 同在 WSL 内（同机回环），代理前提与本地等价；
+    // 镜像网络 / VS Code 端口转发下 Windows 侧 webview 可达 WSL 的 127.0.0.1。
+    if (vscode.env && vscode.env.remoteName && vscode.env.remoteName !== 'wsl') return false;
     const u = new URL(getUrl());
     return ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(u.hostname);
   } catch {
@@ -870,10 +872,50 @@ function createAuthProxy(targetUrl) {
  * @param {boolean} isTab 是否标签页模式
  * @returns {Promise<{displayUrl: string} | {unauthorized: true}>}
  */
+/** 无代理时对 dsh 首页做直接状态探测（401 = 新版需要认证，用于让引导可达）。 */
+function probeDirectIndexStatus(timeoutMs = 4000) {
+  return new Promise((done) => {
+    try {
+      const u = new URL(getUrl());
+      const lib = u.protocol === 'https:' ? https : http;
+      const req = lib.request({
+        hostname: u.hostname,
+        port: Number(u.port) || (u.protocol === 'https:' ? 443 : 80),
+        path: '/',
+        method: 'GET',
+        headers: { accept: '*/*' }
+      }, (res) => {
+        res.resume();
+        done(res.statusCode || 0);
+      });
+      req.on('error', () => done(0));
+      req.setTimeout(timeoutMs, () => { req.destroy(); done(0); });
+      req.end();
+    } catch {
+      done(0);
+    }
+  });
+}
+
+/**
+ * 为面板解析最终展示地址：
+ * - 代理可用且 Cookie 就绪 → 代理地址（webview 由此获得无感认证）；
+ * - 代理可用但未认证且上游 401 → { unauthorized: true }（引导接管）；
+ * - 无代理（真远程/非回环）但直连探测到 401 → { unauthorized: true }（让中文引导
+ *   与「在浏览器中打开（携带令牌）」可达，不再让用户面对英文 401 原文）；
+ * - 其余（本地老版 dsh / 无认证远程）→ 原直连展示地址。
+ * @param {boolean} isTab 是否标签页模式
+ * @returns {Promise<{displayUrl: string} | {unauthorized: true}>}
+ */
 async function resolvePanelTarget(isTab) {
   let displayUrl = isTab ? getTabDisplayUrl(await resolveDisplayUrl()) : await resolveDisplayUrl();
   const proxy = await ensureAuthProxy();
-  if (!proxy) return { displayUrl };
+  if (!proxy) {
+    // 真远程/非回环：没有代理可注入 Cookie，但至少要给用户可见的中文引导。
+    const status = await probeDirectIndexStatus();
+    if (status === 401) return { unauthorized: true };
+    return { displayUrl };
+  }
   await proxy.waitAuthed(8000);
   if (proxy.hasCookieForBase()) {
     displayUrl = isTab ? proxy.urlForTab() : proxy.baseUrl();
@@ -902,11 +944,15 @@ function maybeGuideAuth(isTab) {
   const now = Date.now();
   if (now - lastAuthPromptAt < 3 * 60 * 1000) return;
   lastAuthPromptAt = now;
-  vscode.window.showWarningMessage(
-    '新版 dsh web 启用了浏览器认证，当前实例不是由本窗口启动，无法静默认证。',
-    '重启并自动认证（推荐）',
-    '粘贴认证链接'
-  ).then(async (choice) => {
+  const hasProxy = !!authProxy; // 无代理 = 真远程/非回环：给浏览器认证出路
+  const actions = hasProxy
+    ? ['重启并自动认证（推荐）', '粘贴认证链接']
+    : ['在浏览器中打开（携带令牌）', '粘贴认证链接'];
+  const message = hasProxy
+    ? '新版 dsh web 启用了浏览器认证，当前实例不是由本窗口启动，无法静默认证。'
+    : '新版 dsh web 需要浏览器认证，当前 Remote/非回环场景无法在面板内自动代理认证。';
+  vscode.window.showWarningMessage(message, ...actions).then(async (choice) => {
+    if (!choice) return;
     if (choice === '重启并自动认证（推荐）') {
       const ok = await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
@@ -924,6 +970,10 @@ function maybeGuideAuth(isTab) {
       } else {
         vscode.window.showErrorMessage('dsh web 重启失败，请手动重启后重试。');
       }
+    } else if (choice === '在浏览器中打开（携带令牌）') {
+      await vscode.commands.executeCommand('dshPanel.openInBrowser');
+      lastAuthPromptAt = 0;
+      // 浏览器完成认证后，用户可手动刷新面板查看（真远程面板仍无法带 Cookie）。
     } else if (choice === '粘贴认证链接') {
       const input = await vscode.window.showInputBox({
         prompt: '粘贴 dsh web 启动时打印的认证链接（形如 http://127.0.0.1:3080/?token=…，整行粘贴即可）',
@@ -1925,11 +1975,15 @@ async function preparePanelHtml(isTab) {
   const target = await resolvePanelTarget(isTab);
   if (target.unauthorized) {
     maybeGuideAuth(isTab);
+    const hasProxy = !!authProxy;
     return {
       ok: false,
       kind: 'unauthorized',
-      reason: 'dsh web 新版启用了浏览器认证，当前实例不是由本窗口启动，无法静默认证。' +
-        '点击面板顶部的「重启 dsh web」，由扩展接管并自动完成认证。'
+      reason: hasProxy
+        ? 'dsh web 新版启用了浏览器认证，当前实例不是由本窗口启动，无法静默认证。' +
+          '点击面板顶部的「重启 dsh web」，由扩展接管并自动完成认证。'
+        : 'dsh web 新版需要浏览器认证，当前 Remote/非回环场景无法在面板内自动代理认证。' +
+          '请查看通知：在浏览器中打开携带令牌的链接完成认证，或粘贴 dsh web 打印的认证链接。'
     };
   }
   try {
@@ -3494,11 +3548,18 @@ function activate(context) {
 
   const openBrowserCmd = vscode.commands.registerCommand('dshPanel.openInBrowser', async () => {
     // 新版 dsh web 有浏览器认证：优先打开携带启动令牌的认证链接（真实浏览器
-    // 顶层导航可正常换取 Cookie）；无令牌时退回裸地址。
+    // 顶层导航可正常换取 Cookie）；有代理则用代理合成的认证地址，无代理时
+    // 也尽量用 stdout 捕获到的令牌拼链接，让用户始终有手动认证出路。
     let url = getUrl();
     const proxy = await ensureAuthProxy();
     if (proxy && proxy.token()) {
       url = proxy.authenticatedUrl();
+    } else if (dshLaunchToken) {
+      try {
+        const u = new URL(url);
+        u.searchParams.set('token', dshLaunchToken);
+        url = u.toString();
+      } catch { /* 保持裸地址 */ }
     }
     vscode.env.openExternal(vscode.Uri.parse(url));
   });

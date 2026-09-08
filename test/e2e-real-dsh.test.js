@@ -200,9 +200,12 @@ async function main() {
 
     console.log('[5] 真实重启场景（与扩展「重启 dsh web」同路径）');
     const tokenBeforeRestart = proxy.token();
-    // 杀掉 E2E 自己拉起的实例，释放端口
+    // 杀掉 E2E 自己拉起的实例，释放端口（Windows taskkill / POSIX SIGKILL）
     if (process.platform === 'win32' && child.pid) {
       spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], { stdio: 'ignore', windowsHide: true });
+      killedOwnChild = true;
+    } else if (child.pid && !killedOwnChild) {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
       killedOwnChild = true;
     }
     for (let i = 0; i < 20; i++) { await sleep(500); if (await portFree(PORT)) break; }
@@ -239,20 +242,24 @@ async function main() {
       killed = true;
     }
     if (!killed) {
-      // 按端口清理扩展拉起的实例（Windows：netstat 找 LISTENING PID → taskkill /t）
-      const net = require('child_process').execSync('netstat -ano -p tcp', { encoding: 'utf8' });
-      const pids = new Set();
-      for (const line of net.split(/\r?\n/)) {
-        const parts = line.trim().split(/\s+/);
-        if (parts.length >= 5 && parts[0] === 'TCP' && parts[1] === '127.0.0.1:' + PORT && parts[3] === 'LISTENING' && parts[4]) {
-          pids.add(parts[4]);
-        }
-      }
-      for (const pid of pids) {
-        try { spawn('taskkill', ['/pid', pid, '/t', '/f'], { stdio: 'ignore', windowsHide: true }); } catch { /* noop */ }
-      }
+      // 按端口清理 [5] 阶段扩展函数拉起的实例（跨平台：Windows netstat+taskkill；
+      // POSIX 用 fuser/lsof，不依赖 netstat（Linux 常无该命令））。
+      const execSync = require('child_process').execSync;
       if (process.platform !== 'win32') {
-        try { require('child_process').execSync('fuser -k ' + PORT + '/tcp 2>/dev/null || true'); } catch { /* noop */ }
+        try { execSync('fuser -k ' + PORT + '/tcp 2>/dev/null || true'); } catch { /* noop */ }
+        try { execSync('lsof -ti:' + PORT + ' 2>/dev/null | xargs -r kill -9 2>/dev/null || true'); } catch { /* noop */ }
+      } else {
+        const net = execSync('netstat -ano -p tcp', { encoding: 'utf8' });
+        const pids = new Set();
+        for (const line of net.split(/\r?\n/)) {
+          const parts = line.trim().split(/\s+/);
+          if (parts.length >= 5 && parts[0] === 'TCP' && parts[1] === '127.0.0.1:' + PORT && parts[3] === 'LISTENING' && parts[4]) {
+            pids.add(parts[4]);
+          }
+        }
+        for (const pid of pids) {
+          try { spawn('taskkill', ['/pid', pid, '/t', '/f'], { stdio: 'ignore', windowsHide: true }); } catch { /* noop */ }
+        }
       }
     }
     await sleep(800);
