@@ -3436,7 +3436,6 @@ function activate(context) {
       { enableScripts: true, retainContextWhenHidden: true }
     );
     activeTab = panel;
-    tabReloadFn = reloadTab;
     // 标签页接管 DSH：侧边栏若已打开则改为占位，避免双 webview 同时加载 DSH 互斥。
     if (activeView) {
       activeView.description = '在标签页中打开';
@@ -3456,6 +3455,7 @@ function activate(context) {
         panel.webview.html = buildErrorHtml('标签页渲染失败：' + (e && e.message ? e.message : String(e)));
       }
     };
+    tabReloadFn = reloadTab;
 
     const cfgSub = vscode.workspace.onDidChangeConfiguration((e) => {
       if (disposed) return;
