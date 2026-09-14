@@ -3713,5 +3713,7 @@ module.exports.__internals = {
   getPort,
   getDshCommand,
   runCommandOk,
-  runCommandOutput
+  runCommandOutput,
+  isLocalLoopbackTarget,
+  probeDirectIndexStatus
 };
