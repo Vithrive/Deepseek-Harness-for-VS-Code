@@ -1534,7 +1534,7 @@ function escapeHtml(s) {
 // 用户只需安装本扩展，无需手动安装 DSH 插件。
 // =====================================================================
 const DSH_PLUGIN_NAME = 'dsh-drop-caret';
-const DSH_PLUGIN_MIN = '0.2.2';
+const DSH_PLUGIN_MIN = '0.2.3';
 const NPMJS_REGISTRY = 'https://registry.npmjs.org/';
 // 内置分发的兼容插件（随扩展文件直接写入 DSH web profile，不经 npm）：
 // 修复 macOS 上 DSH 页面被本扩展以跨源 iframe 内嵌时 ⌘C/⌘V/⌘X 失效的问题。
