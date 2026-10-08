@@ -1437,7 +1437,29 @@ function buildSuspendedHtml() {
 </html>`;
 }
 
-function buildIframeHtml(url, scale) {
+/**
+ * 把字符串编成可安全嵌入 <script> 的 JS 字面量（转义 `<`/`>`/`&` 与行分隔符，
+ * 防止内容提前闭合脚本标签）。
+ * @param {unknown} value
+ * @returns {string}
+ */
+function jsonForScript(value) {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}
+
+/**
+ * 生成面板 HTML：内嵌 DSH Web GUI 的 iframe + 与 DSH 页面内插件通信的中继脚本。
+ * @param {string} url 显示地址（DSH Web GUI）
+ * @param {number} scale 字号缩放比例
+ * @param {'revealAndOpen'|'revealOnly'|'off'} [requestedFileLinkMode] 工作区文件链接接管开关
+ * @returns {string}
+ */
+function buildIframeHtml(url, scale, requestedFileLinkMode) {
   // 解析显示地址，仅放行 http/https，并把其精确 origin 写入 frame-src，
   // 不再通配整个本机回环地址段，保持 webview 沙箱最小权限。
   // Remote 场景下 asExternalUri 可能返回带转发端口的 localhost 地址，也可能返回 HTTPS 转发域名，
@@ -1454,6 +1476,8 @@ function buildIframeHtml(url, scale) {
   const origin = target.origin; // 形如 http://127.0.0.1:3080 或 https://xxxx.example.com
   const nonce = makeNonce();
   const s = Number.isFinite(scale) ? Math.min(2, Math.max(0.5, scale)) : 1;
+  // 工作区文件链接接管开关（off = 只做环境标记，不给握手回执，DSH 页面内的插件保持惰性）。
+  const fileLinkMode = FILE_LINK_ACTIONS.includes(requestedFileLinkMode) && requestedFileLinkMode !== 'off' ? requestedFileLinkMode : 'off';
   // 用 CSS zoom 缩放（重新布局、按设备分辨率渲染，任意字号下清晰），
   // 不用 transform:scale（渲染后栅格化缩放，非整数倍缩放时整页模糊）。
   return `<!DOCTYPE html>
@@ -1464,7 +1488,7 @@ function buildIframeHtml(url, scale) {
       content="default-src 'none'; frame-src ${escapeHtml(origin)}; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 </head>
 <body style="margin:0;padding:0;width:100vw;height:100vh;overflow:hidden;background:var(--vscode-editor-background);">
-<iframe id="dsh-frame" src="${escapeHtml(url)}"
+<iframe id="dsh-frame" name="${VSCODE_HOST_ID}" src="${escapeHtml(url)}"
         style="width:100%;height:100%;border:none;display:block;zoom:${s};"
         allow="clipboard-read; clipboard-write; autoplay"></iframe>
 <script nonce="${nonce}">
@@ -1472,6 +1496,40 @@ function buildIframeHtml(url, scale) {
   var frame = document.getElementById('dsh-frame');
   var current = ${s};
   var vscode = acquireVsCodeApi();
+  // 与 DSH 页面内插件 dsh-vscode-file-links 之间的协议常量：插件发消息时带
+  // source = PLUGIN_ID，本 webview 回消息时带 source = HOST_ID。
+  var HOST_ID = ${jsonForScript(VSCODE_HOST_ID)};
+  var PLUGIN_ID = ${jsonForScript(FILE_LINK_PLUGIN_SOURCE)};
+  var FRAME_ORIGIN = ${jsonForScript(origin)};
+  var fileLinkMode = ${jsonForScript(fileLinkMode)};
+  function frameWindow() {
+    return frame && frame.contentWindow ? frame.contentWindow : null;
+  }
+  /** 消息是否来自本面板的 DSH iframe：origin 必须相符；source 正常为 iframe 的
+   *  window，个别宿主/沙箱环境下可能为 null（此时 origin 已足以判定——本页可达的
+   *  同源窗口只有 DSH iframe 本身）。 */
+  function fromOurFrame(event) {
+    if (event.origin !== FRAME_ORIGIN) return false;
+    return event.source === null || event.source === frameWindow();
+  }
+  function postToFrame(payload) {
+    var w = frameWindow();
+    if (!w) return;
+    try { w.postMessage(payload, FRAME_ORIGIN); } catch (e) { /* 页面正在切换：忽略 */ }
+  }
+  /** 握手回执：插件据此确认「外层是本 VS Code 面板，可以接管文件链接点击」。 */
+  function ackFrame() {
+    if (fileLinkMode === 'off') return;
+    postToFrame({ source: HOST_ID, type: 'ack', fileLinks: true, mode: fileLinkMode });
+  }
+  if (frame) {
+    // iframe 每次加载（刷新 / 重启 dsh web）后重新握手，兼容插件先于或后于本脚本就绪。
+    frame.addEventListener('load', function () {
+      ackFrame();
+      setTimeout(ackFrame, 600);
+      setTimeout(ackFrame, 2000);
+    });
+  }
   function apply(scale) {
     var n = Number(scale);
     if (!isFinite(n)) return;
@@ -1483,6 +1541,28 @@ function buildIframeHtml(url, scale) {
   window.addEventListener('message', function (event) {
     var data = event.data;
     if (!data) return;
+    if (data.source === PLUGIN_ID) {
+      // DSH 页面内插件发来的消息：只认自己那个 iframe、且 origin 必须是 DSH 地址。
+      if (!fromOurFrame(event)) return;
+      if (data.type === 'hello') {
+        ackFrame();
+        return;
+      }
+      if (data.type === 'reveal' && fileLinkMode !== 'off' && typeof data.token === 'string' && typeof data.path === 'string') {
+        // 点击了工作区文件/文件夹链接：交给扩展宿主去资源管理器里定位并打开。
+        vscode.postMessage({
+          type: 'dsh-reveal-path',
+          token: data.token.slice(0, 64),
+          path: data.path.slice(0, 4096)
+        });
+      }
+      return;
+    }
+    if (data.type === 'dsh-reveal-result' && typeof data.token === 'string') {
+      // 扩展宿主的处理结果：转发回 DSH 页面，由插件决定是否回放原始点击。
+      postToFrame({ source: HOST_ID, type: 'reveal-result', token: data.token, ok: data.ok === true });
+      return;
+    }
     if (data.type === 'dsh-font-scale' && typeof data.scale === 'number') {
       apply(data.scale);
     } else if (data.type === 'dsh-open-link' && typeof data.url === 'string') {
@@ -1540,6 +1620,20 @@ const NPMJS_REGISTRY = 'https://registry.npmjs.org/';
 // 修复 macOS 上 DSH 页面被本扩展以跨源 iframe 内嵌时 ⌘C/⌘V/⌘X 失效的问题。
 const CLIPBOARD_PLUGIN_NAME = 'dsh-webview-clipboard';
 const CLIPBOARD_PLUGIN_VERSION = '0.2.1';
+// 内置分发的工作区文件链接插件（源码在 dsh-plugins/ 目录，随扩展文件直接写入
+// DSH web profile，不经 npm）：点对话里的工作区文件/文件夹链接时，改为在本窗口的
+// VS Code 资源管理器中定位并打开。
+const FILE_LINK_PLUGIN_NAME = 'dsh-vscode-file-links';
+// 插件源码所在目录（打包进 .vsix，运行时按单一源头读取，避免模板字面量转义问题）。
+const BUNDLED_PLUGINS_DIR = 'dsh-plugins';
+// DSH 页面（iframe）与 webview 之间的握手 / 转发协议标识。
+const VSCODE_HOST_ID = 'dsh-vscode-host';
+const FILE_LINK_PLUGIN_SOURCE = 'dsh-vscode-file-links';
+// 文件链接点击行为：资源管理器定位 + 打开文件 / 仅定位 / 不接管（保持 DSH 行为）。
+const FILE_LINK_ACTION_KEY = 'dshPanel.workspaceFileLinkAction';
+const FILE_LINK_ACTIONS = ['revealAndOpen', 'revealOnly', 'off'];
+// Copilot 桥接的「条目 ↔ DSH 在册模型」漂移自检是否已有结论（见 checkDshModelDrift）。
+let dshModelDriftChecked = false;
 
 function dshHomeDir() {
   return process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
@@ -1853,6 +1947,69 @@ async function ensureClipboardPlugin(profileDir) {
 }
 
 /**
+ * 内置工作区文件链接插件 dsh-vscode-file-links 的文件清单（相对路径 → 内容）。
+ * 源码以真实文件形式放在扩展的 dsh-plugins/ 目录里（而非扩展内的模板字面量），
+ * 避免正则反斜杠被模板转义折叠这类问题，也让插件可以单独语法检查。
+ * @returns {Record<string, string>} 相对路径 → 文件内容
+ */
+function fileLinkPluginFiles() {
+  const base = path.join(__dirname, BUNDLED_PLUGINS_DIR, FILE_LINK_PLUGIN_NAME);
+  const rels = ['package.json', 'cordis.patch.yml', 'lib/index.js', 'lib/client.js'];
+  const files = {};
+  for (const rel of rels) {
+    files[rel] = fs.readFileSync(path.join(base, rel), 'utf8');
+  }
+  return files;
+}
+
+/** 内置工作区文件链接插件的版本（以插件自己的 package.json 为单一源头）。 */
+function fileLinkPluginVersion() {
+  try {
+    return JSON.parse(fileLinkPluginFiles()['package.json']).version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+/**
+ * 确保内置插件 dsh-vscode-file-links 已落盘并声明（不经 npm）。
+ * @returns {Promise<boolean>} 本次是否发生新增/升级（true 时需重启 dsh web 生效）。
+ */
+async function ensureFileLinkPlugin(profileDir) {
+  try {
+    const version = fileLinkPluginVersion();
+    const installed = await installedPluginVersion(profileDir, FILE_LINK_PLUGIN_NAME);
+    if (installed === version) {
+      await ensureProfileDeclaration(profileDir, FILE_LINK_PLUGIN_NAME, null);
+      return false; // 版本一致，无需写入
+    }
+    const files = fileLinkPluginFiles();
+    const base = path.join(profileDir, 'node_modules', FILE_LINK_PLUGIN_NAME);
+    for (const rel of Object.keys(files)) {
+      const dest = path.join(base, rel);
+      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+      await fs.promises.writeFile(dest, files[rel], 'utf8');
+    }
+    // dependencies 不写入该包（npm 注册表上没有），只登记 bundles 供 DSH 加载。
+    await ensureProfileDeclaration(profileDir, FILE_LINK_PLUGIN_NAME, null);
+    return true;
+  } catch (e) {
+    console.error(`[DeepSeek Harness] 安装内置插件 ${FILE_LINK_PLUGIN_NAME} 失败：`, e);
+    vscode.window.showWarningMessage(`安装 DSH 工作区文件链接插件 ${FILE_LINK_PLUGIN_NAME} 失败：${e.message}`);
+    return false;
+  }
+}
+
+/**
+ * 工作区文件链接的点击行为配置。
+ * @returns {'revealAndOpen'|'revealOnly'|'off'}
+ */
+function fileLinkAction() {
+  const raw = String(cfg().get(FILE_LINK_ACTION_KEY, 'revealAndOpen') || '');
+  return FILE_LINK_ACTIONS.includes(raw) ? raw : 'revealAndOpen';
+}
+
+/**
  * 确保 DSH web profile 已安装并声明 dsh-drop-caret 插件。
  * @returns {Promise<boolean>} 本次是否发生了新增/升级安装（true 时通常需重启 dsh web 生效）。
  */
@@ -1881,6 +2038,14 @@ async function ensureDshPlugins() {
         changed = true;
       }
     }
+    // 内置工作区文件链接插件（文件随扩展直接写入，不走 npm）：
+    // 让 DSH 对话里的工作区文件/文件夹链接改在 VS Code 资源管理器中定位并打开。
+    // 配置为 off（不接管）时不安装/不更新，插件不动 DSH 既有行为。
+    if (fileLinkAction() !== 'off') {
+      if (await ensureFileLinkPlugin(profileDir)) {
+        changed = true;
+      }
+    }
     return changed;
   } catch (e) {
     console.error(`[DeepSeek Harness] 自动安装 ${DSH_PLUGIN_NAME} 失败：`, e);
@@ -1890,16 +2055,151 @@ async function ensureDshPlugins() {
 }
 
 /**
- * 处理 webview 消息：DSH 页面内点击外部链接用系统浏览器打开；发送选中内容回执提示。
+ * 规范化链接里的路径文本：去成对引号与首尾空白、反斜杠统一为 `/`、去掉 `./` 前缀。
+ * @param {unknown} raw
+ * @returns {string}
+ */
+function normalizeLinkPath(raw) {
+  let s = typeof raw === 'string' ? raw.trim() : '';
+  if (s.length === 0) return '';
+  if (s.length >= 2 && ((s[0] === '"' && s[s.length - 1] === '"') || (s[0] === "'" && s[s.length - 1] === "'"))) {
+    s = s.slice(1, -1).trim();
+  }
+  s = s.replace(/\\/g, '/');
+  return s.replace(/^(?:\.\/)+/, '');
+}
+
+/** 是否绝对路径（POSIX /、Windows 盘符 `C:/`、UNC `//server/share`）。 */
+function isAbsoluteLinkPath(p) {
+  return p.startsWith('/') || /^[A-Za-z]:\//.test(p);
+}
+
+/** 路径比较用规范形式：统一分隔符、去尾斜杠，Windows/macOS 下大小写不敏感。 */
+function normalizePathForCompare(p) {
+  let s = path.normalize(String(p)).replace(/\\/g, '/');
+  if (process.platform === 'win32' || process.platform === 'darwin') s = s.toLowerCase();
+  return s.replace(/\/+$/, '');
+}
+
+/** abs 是否位于 folder（含 folder 自身）之内。 */
+function isInsideFolder(abs, folder) {
+  const a = normalizePathForCompare(abs);
+  const f = normalizePathForCompare(folder);
+  if (f === '') return false;
+  return a === f || a.startsWith(f + '/');
+}
+
+/** 由链接路径生成候选 Uri：绝对路径按原样；相对路径对每个工作区文件夹各拼一个。 */
+function candidateLinkUris(p, folders) {
+  const out = [];
+  if (isAbsoluteLinkPath(p)) {
+    try {
+      out.push(vscode.Uri.file(p));
+    } catch {
+      // 非法路径：无候选
+    }
+    return out;
+  }
+  const segments = p.split('/').filter((s) => s !== '');
+  for (const folder of folders) {
+    try {
+      // joinPath 会规范化 `.` / `..`，越出工作区的候选稍后被 isInsideFolder 拒掉。
+      out.push(vscode.Uri.joinPath(folder.uri, ...segments));
+    } catch {
+      // 非法路径：跳过该候选
+    }
+  }
+  return out;
+}
+
+/**
+ * 把链接里的路径解析为「当前 VS Code 工作区内真实存在的文件/文件夹」。
+ * 解析顺序：原样 → 去掉尾部行号（`:12` / `#L12`）再试；相对路径对每个工作区文件夹
+ * 各拼一个候选，绝对路径按原样；候选一律要求落在某个工作区文件夹内且 stat 成功。
+ * 这是「前提：VS Code 打开的工作区里包含该文件/文件夹」的落点。
+ * @param {unknown} raw 链接里的路径文本
+ * @returns {Promise<{uri: any, kind: 'file'|'folder'} | null>}
+ */
+async function resolveWorkspaceTarget(raw) {
+  const folders = (vscode.workspace.workspaceFolders || []).filter((f) => f.uri && f.uri.scheme === 'file');
+  if (folders.length === 0) return null;
+  const cleaned = normalizeLinkPath(raw);
+  if (cleaned === '' || cleaned.length > 4096 || /[\u0000-\u001f\u007f]/.test(cleaned)) return null;
+  const variants = [cleaned];
+  const withoutLine = cleaned.replace(/[:#]L?\d+(?:-\d+)?$/i, '');
+  if (withoutLine !== cleaned && withoutLine !== '') variants.push(withoutLine);
+  for (const v of variants) {
+    for (const uri of candidateLinkUris(v, folders)) {
+      if (!folders.some((f) => isInsideFolder(uri.fsPath, f.uri.fsPath))) continue;
+      try {
+        const stat = await vscode.workspace.fs.stat(uri);
+        return { uri, kind: stat.type === vscode.FileType.Directory ? 'folder' : 'file' };
+      } catch {
+        // 该候选不存在：试下一个
+      }
+    }
+  }
+  return null;
+}
+
+/** 把处理结果回执给 webview（由 webview 转发回 DSH 页面里的插件）。 */
+function replyRevealResult(webview, token, ok) {
+  if (!webview || typeof webview.postMessage !== 'function') return;
+  try {
+    webview.postMessage({ type: 'dsh-reveal-result', token: token, ok: ok === true });
+  } catch {
+    // webview 已销毁：忽略
+  }
+}
+
+/**
+ * 处理「DSH 对话里点击工作区文件/文件夹链接」：在当前窗口的 VS Code 资源管理器中
+ * 定位并打开，再把结果回执给 webview。
+ *
+ * 只有确认能打开（目标在当前工作区内且真实存在）才回执成功；否则回执失败，DSH 页面里
+ * 的插件会回放原始点击，保持 DSH 自身行为（在 DSH 侧边栏打开）——不会出现点了没反应。
+ * @param {{token?: unknown, path?: unknown}} msg
+ * @param {any} webview 发起请求的 webview（侧边栏视图或编辑器标签页）
+ */
+async function revealWorkspaceTarget(msg, webview) {
+  const token = typeof msg.token === 'string' ? msg.token.slice(0, 64) : '';
+  let target = null;
+  if (fileLinkAction() !== 'off') {
+    target = await resolveWorkspaceTarget(msg.path);
+  }
+  if (!target) {
+    replyRevealResult(webview, token, false);
+    const shown = typeof msg.path === 'string' ? msg.path : '';
+    vscode.window.setStatusBarMessage(
+      'DSH 链接不在当前 VS Code 工作区内：' + (shown.length > 60 ? shown.slice(0, 57) + '…' : shown),
+      4000
+    );
+    return;
+  }
+  await vscode.commands.executeCommand('revealInExplorer', target.uri);
+  if (fileLinkAction() === 'revealAndOpen' && target.kind === 'file') {
+    // 用 vscode.open 交给 VS Code 自己挑编辑器（文本/图片/PDF 都能打开）。
+    await vscode.commands.executeCommand('vscode.open', target.uri, { preview: false, preserveFocus: false });
+  }
+  replyRevealResult(webview, token, true);
+}
+
+/**
+ * 处理 webview 消息：DSH 页面内点击外部链接用系统浏览器打开；点击工作区文件链接在
+ * VS Code 资源管理器中定位并打开；发送选中内容回执提示。
  * 侧边栏面板与编辑器标签页共用。
  * @param {any} msg
+ * @param {any} [webview] 发起消息的 webview（用于回执；老调用点可省略）
  */
-function handleWebviewMessage(msg) {
+function handleWebviewMessage(msg, webview) {
   if (msg && msg.type === 'dsh-open-link' && typeof msg.url === 'string') {
     const u = msg.url;
     if (/^https?:\/\//i.test(u)) {
       vscode.env.openExternal(vscode.Uri.parse(u));
     }
+  } else if (msg && msg.type === 'dsh-reveal-path') {
+    const token = typeof msg.token === 'string' ? msg.token.slice(0, 64) : '';
+    revealWorkspaceTarget(msg, webview).catch(() => replyRevealResult(webview, token, false));
   } else if (msg && msg.type === 'insert-selection-ack') {
     if (msg.status === 'forwarded') {
       vscode.window.showInformationMessage('已转发到 DSH 对话框');
@@ -1956,7 +2256,7 @@ async function preparePanelHtml(isTab) {
   const pluginInstalled = await ensureDshPlugins();
   if (pluginInstalled && (await checkUrl(getUrl()))) {
     // 服务已在运行但插件刚装上，需重启 dsh web 才加载。
-    vscode.window.showInformationMessage('已自动安装/更新 DSH 插件（dsh-drop-caret / dsh-webview-clipboard），请点击面板顶部的「重启 dsh web」使其生效。');
+    vscode.window.showInformationMessage('已自动安装/更新 DSH 插件（dsh-drop-caret / dsh-webview-clipboard / dsh-vscode-file-links），请点击面板顶部的「重启 dsh web」使其生效。');
   }
 
   const ok = await ensureRunningOnce();
@@ -1987,7 +2287,7 @@ async function preparePanelHtml(isTab) {
     };
   }
   try {
-    return { ok: true, html: buildIframeHtml(target.displayUrl, getFontScale()) };
+    return { ok: true, html: buildIframeHtml(target.displayUrl, getFontScale(), fileLinkAction()) };
   } catch (e) {
     // 显示地址无法解析或协议不是 http/https 时，拒绝加载 iframe 并展示错误页。
     return { ok: false, kind: 'unloadable', reason: e.message };
@@ -2839,10 +3139,92 @@ const SYNTHETIC_PROGRESS_TEXTS = {
  * 同一提问被 VS Code 重复投递时，不新建会话、不重复提交 prompt，只把已有/正在产出的回答
  * 再流式给本调用，保证「裸提问」与「带上下文」两次调用都能拿到答案。
  */
+/**
+ * 从一条 DSH 会话事件里取出「要回写给 Copilot 的助手正文」。
+ *
+ * 两代协议：
+ *  - DSH 0.2.x（当前）：`assistant/message`——每个 step 一条助手消息，正文在
+ *    `data.message.content` 的 `text` 块里（`reasoning` / `tool-call` 块不外发）；
+ *  - DSH 0.1.x（旧）：`assistant/chunk` 的 `text-delta` 增量，历史里则只有整块
+ *    `block-end`（此时用整块文本，见 alreadyEmitted 语义）。
+ *
+ * 注意：0.2.x 起 DSH **不再发 `assistant/chunk`**，只认旧事件会让 Copilot 侧
+ * 「任务已提交、却收不到任何回答」——这是 v0.8.48 之前版本的线上问题根因。
+ * @param {any} event
+ * @param {boolean} alreadyEmitted 本轮是否已经回写过正文（决定整块 block-end 是否要发）
+ * @returns {{kind: 'message'|'delta', text: string} | null}
+ */
+function dshEventText(event, alreadyEmitted) {
+  const e = event || {};
+  const data = e.data || {};
+  if (e.type === 'assistant/message') {
+    const content = data.message && data.message.content;
+    if (!Array.isArray(content)) return null;
+    let text = '';
+    for (const c of content) {
+      if (c && c.type === 'text' && typeof c.text === 'string') text += c.text;
+    }
+    return text ? { kind: 'message', text } : null;
+  }
+  if (e.type === 'assistant/chunk' && data.chunk) {
+    const c = data.chunk;
+    if (c.type === 'block-end' && c.block && typeof c.block.text === 'string' && c.block.text.length > 0) {
+      // 增量已经流过就不再重发整块（旧协议的历史回放里只有整块）。
+      return alreadyEmitted ? null : { kind: 'message', text: c.block.text };
+    }
+    if (c.type === 'text-delta' && typeof c.text === 'string' && c.text.length > 0) {
+      return { kind: 'delta', text: c.text };
+    }
+  }
+  return null;
+}
+
+/**
+ * 消费一批 DSH 会话事件：把助手正文回写给 Copilot，推进游标并报告回合是否结束。
+ * 抽成纯函数（只依赖 progress.report）便于单测；实时轮询与历史回放共用同一套语义。
+ * @param {any[]} events
+ * @param {{lastSeq?: number, started?: boolean, emitted?: boolean}} state
+ * @param {{report: (part: any) => void}} progress
+ * @returns {{lastSeq: number, started: boolean, emitted: boolean, ended: boolean, endReason: any}}
+ */
+function applyDshEvents(events, state, progress) {
+  const st = {
+    lastSeq: (state && state.lastSeq) || 0,
+    started: !!(state && state.started),
+    emitted: !!(state && state.emitted),
+    ended: false,
+    endReason: undefined
+  };
+  for (const item of events || []) {
+    const e = item && item.event ? item.event : item;
+    if (!e || typeof e.seq !== 'number' || e.seq <= st.lastSeq) continue;
+    st.lastSeq = e.seq;
+    if (e.type === 'turn/start') {
+      st.started = true; // 防御：错过 turn/start 也照常流式
+      continue;
+    }
+    if (e.type === 'turn/end') {
+      st.started = true; // 防御：即使错过 turn/start 也正常结束
+      st.ended = true;
+      st.endReason = e.data && e.data.reason;
+      continue;
+    }
+    const piece = dshEventText(e, st.emitted);
+    if (piece === null) continue;
+    st.started = true;
+    // 同一个回合里多条助手消息之间补空行，避免正文粘连。
+    const sep = piece.kind === 'message' && st.emitted ? '\n\n' : '';
+    progress.report(makeTextPart(sep + piece.text));
+    st.emitted = true;
+  }
+  return st;
+}
+
 async function replayDshAnswer(base, sid, timeoutMs, progress, token) {
   const deadline = Date.now() + timeoutMs;
   let lastSeq = 0;
   let started = false;
+  let emitted = false;
   try {
     const pre = await fetchSessionHistory(base, sid);
     const events = (pre && Array.isArray(pre.events)) ? pre.events : [];
@@ -2851,7 +3233,6 @@ async function replayDshAnswer(base, sid, timeoutMs, progress, token) {
       if (e && typeof e.seq === 'number' && e.type === 'turn/start') lastSeq = e.seq > 0 ? e.seq - 1 : 0;
     }
   } catch (_) { /* 拿不到起点就从 0 开始 */ }
-  let blockEndSeen = false;
   while (Date.now() < deadline) {
     if (token.isCancellationRequested) return;
     let hist;
@@ -2859,29 +3240,21 @@ async function replayDshAnswer(base, sid, timeoutMs, progress, token) {
       hist = await fetchSessionHistory(base, sid);
     } catch (_) { return; }
     const events = (hist && Array.isArray(hist.events)) ? hist.events : [];
-    let ended = false;
-    for (const item of events) {
-      const e = item && item.event ? item.event : item;
-      if (!e || typeof e.seq !== 'number' || e.seq <= lastSeq) continue;
-      lastSeq = e.seq;
-      if (e.type === 'turn/start') {
-        started = true;
-        blockEndSeen = false;
-      } else if (e.type === 'assistant/chunk' && e.data && e.data.chunk) {
-        const c = e.data.chunk;
-        if (c.type === 'block-end' && c.block && typeof c.block.text === 'string' && c.block.text.length > 0) {
-          blockEndSeen = true;
-          if (!started) started = true;
-          progress.report(makeTextPart(c.block.text));
-        } else if (c.type === 'text-delta' && !blockEndSeen && typeof c.text === 'string' && c.text.length > 0) {
-          if (!started) started = true;
-          progress.report(makeTextPart(c.text));
-        }
-      } else if (e.type === 'turn/end') {
-        ended = true;
+    const res = applyDshEvents(events, { lastSeq, started, emitted }, progress);
+    lastSeq = res.lastSeq;
+    started = res.started;
+    emitted = res.emitted;
+    if (res.ended) {
+      const reason = res.endReason;
+      if (reason && reason.kind !== 'completed') {
+        const errDesc = reason.error ? (reason.error.code + ': ' + reason.error.message) : reason.kind;
+        progress.report(makeTextPart('\n\n> ⚠️ DSH 任务未正常完成（' + errDesc + '）。可到 DSH 面板查看。'));
+      } else if (!res.emitted) {
+        // 静默空回答是上一版最坑的故障形态（事件通道变了却看不出原因），这里明确提示。
+        progress.report(makeTextPart('> ⚠️ DSH 本轮没有产生可回写的正文（可能只执行了工具调用）。可到 DSH 面板查看完整执行过程。'));
       }
+      return;
     }
-    if (ended) return;
     await sleep(1000);
   }
 }
@@ -2940,6 +3313,8 @@ async function handleDshModelRequest(model, messages, options, progress, token) 
       progress.report(makeTextPart('❌ 无法连接 DSH 服务（' + getUrl() + '）。请打开 DSH 面板确认其已启动。'));
       return;
     }
+    // 映射漂移自检（每次扩展会话一次，DSH 已确认可达）：模型改名后不再静默回落。
+    checkDshModelDrift().catch(() => {});
 
     const fullConvText = serializeLmMessages(messages);
 
@@ -3140,6 +3515,7 @@ async function handleDshModelRequest(model, messages, options, progress, token) 
     const deadline = Date.now() + timeoutMs;
     let lastSeq = 0;
     let started = false;
+    let emitted = false;
     try {
       const pre = await fetchSessionHistory(base, sid);
       const preEvents = (pre && Array.isArray(pre.events)) ? pre.events : [];
@@ -3175,31 +3551,24 @@ async function handleDshModelRequest(model, messages, options, progress, token) 
         return;
       }
       const events = (hist && Array.isArray(hist.events)) ? hist.events : [];
-      for (const item of events) {
-        const e = item && item.event ? item.event : item;
-        if (!e || typeof e.seq !== 'number' || e.seq <= lastSeq) continue;
-        lastSeq = e.seq;
-        if (e.type === 'turn/start') {
-          started = true;
-        } else if (e.type === 'assistant/chunk' && e.data && e.data.chunk) {
-          const c = e.data.chunk;
-          if (c.type === 'text-delta' && typeof c.text === 'string' && c.text.length > 0) {
-            if (!started) started = true; // 防御：错过 turn/start 也照常流式
-            progress.report(makeTextPart(c.text));
-          }
-        } else if (e.type === 'turn/end') {
-          started = true; // 防御：即使错过 turn/start 也正常结束
-          const reason = e.data && e.data.reason;
-          if (reason && reason.kind !== 'completed') {
-            const errDesc = reason.error ? (reason.error.code + ': ' + reason.error.message) : reason.kind;
-            progress.report(makeTextPart('\n\n> ⚠️ DSH 任务未正常完成（' + errDesc + '）。可到 DSH 面板查看。'));
-          }
-          console.log('[DeepSeek Harness] dsh 模型请求完成');
-          entry.pending = false;
-          entry.completed = true;
-          try { await gContext.globalState.update(DSH_MODEL_MAP_KEY, map); } catch (_) {}
-          return;
+      const res = applyDshEvents(events, { lastSeq, started, emitted }, progress);
+      lastSeq = res.lastSeq;
+      started = res.started;
+      emitted = res.emitted;
+      if (res.ended) {
+        const reason = res.endReason;
+        if (reason && reason.kind !== 'completed') {
+          const errDesc = reason.error ? (reason.error.code + ': ' + reason.error.message) : reason.kind;
+          progress.report(makeTextPart('\n\n> ⚠️ DSH 任务未正常完成（' + errDesc + '）。可到 DSH 面板查看。'));
+        } else if (!res.emitted) {
+          // 静默空回答是上一版最坑的故障形态（事件通道变了却看不出原因），这里明确提示。
+          progress.report(makeTextPart('> ⚠️ DSH 本轮没有产生可回写的正文（可能只执行了工具调用）。可到 DSH 面板查看完整执行过程。'));
         }
+        console.log('[DeepSeek Harness] dsh 模型请求完成');
+        entry.pending = false;
+        entry.completed = true;
+        try { await gContext.globalState.update(DSH_MODEL_MAP_KEY, map); } catch (_) {}
+        return;
       }
       await sleep(1000);
     }
@@ -3213,14 +3582,80 @@ async function handleDshModelRequest(model, messages, options, progress, token) 
 
 /**
  * 解析 DSH 模型条目 → DeepSeek 官方固定选择；'dsh' 条目返回 null（跟随 VS Code 配置）。
+ *
+ * 与 DeepSeek 现役模型对齐（2026-09-10 API 变更，模型选择器里只保留现役条目）：
+ *  - `deepseek-flash` = DeepSeek-V4.1-Flash（原生多模态），取代旧的 `deepseek-v4-flash`；
+ *  - 旧名 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 官方仅保留兼容路由
+ *    （请求由 V4.1-Flash 承接、按 Flash 计价），DSH 侧**不存在**这两个模型 id，
+ *    对应条目已从选择器移除；这里仍解析这些历史 id，兼容老聊天/配置里留存的条目；
+ *  - `deepseek-v4-pro` = DeepSeek-V4-Pro-0813，继续提供。
+ * 映射值必须是 DSH `llm-deepseek` 配置里实际登记的模型 id——DSH 的
+ * `session.selectModel` 会用 `llm.listModels` 校验，选不中的模型会报
+ * `session/model-unavailable` 并回落到 DSH 默认模型（见 {@link checkDshModelDrift}）。
  * @param {string} modelId
  * @returns {{provider: string, model: string} | null}
  */
 function resolveDshModelSelection(modelId) {
   if (modelId === 'dsh-deepseek-v4-pro') return { provider: 'deepseek-official', model: 'deepseek-v4-pro' };
-  if (modelId === 'dsh-deepseek-v4-flash') return { provider: 'deepseek-official', model: 'deepseek-v4-flash' };
-  if (modelId === 'dsh-deepseek-v4-flash-vision-exp') return { provider: 'deepseek-official', model: 'deepseek-v4-flash-vision-exp' };
+  if (modelId === 'dsh-deepseek-flash') return { provider: 'deepseek-official', model: 'deepseek-flash' };
+  // 历史条目 id（0.8.47 及更早的版本用过）：老会话/设置里可能还留着，继续指向同一模型。
+  if (modelId === 'dsh-deepseek-v4-flash') return { provider: 'deepseek-official', model: 'deepseek-flash' };
+  if (modelId === 'dsh-deepseek-v4-flash-vision-exp') return { provider: 'deepseek-official', model: 'deepseek-flash' };
   return null;
+}
+
+/**
+ * 纯函数：把「条目 → DSH 模型」的映射与 DSH 模型目录（`session/modelCatalog` 的 groups）
+ * 比对，返回未在册的映射。抽出来便于单测（不依赖真实 DSH）。
+ * @param {Array<{id: string, models: Array<{id: string}>}>} groups
+ * @param {Array<{id: string}>} defs
+ * @returns {Array<{entryId: string, provider: string, model: string}>}
+ */
+function findMissingDshModels(groups, defs) {
+  const list = Array.isArray(groups) ? groups : [];
+  const missing = [];
+  for (const def of defs) {
+    const sel = resolveDshModelSelection(def.id);
+    if (sel === null) continue; // 'dsh' 条目跟随 DSH 设置，不固定模型
+    const group = list.find((g) => g && g.id === sel.provider);
+    const hit = group && Array.isArray(group.models) && group.models.some((m) => m && m.id === sel.model);
+    if (!hit) missing.push({ entryId: def.id, provider: sel.provider, model: sel.model });
+  }
+  return missing;
+}
+
+/**
+ * 校验「VS Code 条目 → DSH 模型 id」的映射在 DSH 里真实存在（每次扩展会话最多一次）。
+ *
+ * 为什么需要：DSH 的 `session.selectModel` 校验失败时扩展会**静默**回落 DSH 默认模型，
+ * 用户只在选择器里看到选项、却不知道实际跑的是别的模型（模型改名后就是这样翻车的）。
+ * 这里在 DSH 可达时读一次 `session/modelCatalog`（DSH Web 模型选择器的同一数据源），
+ * 发现失配就明确告警，避免再次静默。
+ * @returns {Promise<void>}
+ */
+async function checkDshModelDrift() {
+  if (dshModelDriftChecked) return;
+  try {
+    if (!(await checkUrl(getUrl()))) return; // DSH 没在跑：本次不置位，下次提问再查
+    const base = await apiBase();
+    const catalog = await dshRpc(base, 'session/modelCatalog', { args: {} }, 15000);
+    dshModelDriftChecked = true; // 拿到确定结论后才置位
+    const groups = (catalog && catalog.groups) || [];
+    const missing = findMissingDshModels(groups, DSH_MODEL_DEFS);
+    if (missing.length === 0) return;
+    const registered = groups
+      .filter((g) => g && g.id === 'deepseek-official')
+      .flatMap((g) => (g.models || []).map((m) => m.id));
+    const text = 'DSH 模型条目与 DSH 在册模型不一致：'
+      + missing.map((m) => m.entryId + ' → ' + m.provider + '/' + m.model).join('；')
+      + '。DSH 当前在册：' + (registered.length ? registered.join(', ') : '（未配置 deepseek-official）')
+      + '。选中这些条目会静默回落 DSH 默认模型，请升级扩展或在 dshPanel.chatModel 里手动指定。';
+    console.warn('[DeepSeek Harness] ' + text);
+    vscode.window.showWarningMessage(text);
+  } catch (e) {
+    // 老版本 dsh 没有 session/modelCatalog、或认证不可用：不再重试（映射本身仍按当前约定工作）。
+    dshModelDriftChecked = true;
+  }
 }
 
 /**
@@ -3244,6 +3679,24 @@ async function selectModelForSession(base, sid, provider, chatModel, effort) {
 }
 
 /**
+ * VS Code 模型选择器里的 DSH 条目定义——只列 DeepSeek **现役**模型（退役模型不再出现，
+ * 否则用户会选到一个 DSH 根本不认的条目并被静默回落）。
+ *
+ * 成本口径：DeepSeek 官网 Models & Pricing（2026-09 调价后的**峰值价**，每 1M tokens；
+ * 非高峰时段为半价）。字段名对齐 vizards 的 toModelCostInfo。
+ */
+const DSH_MODEL_DEFS = [
+  { id: 'dsh', name: 'DSH (DeepSeek Harness)', detail: '默认：跟随 DSH 设置模型 · 档位可配',
+    cost: { inputCost: '$0.3', outputCost: '$1.2', cacheCost: '$0.006' } },
+  { id: 'dsh-deepseek-flash', name: 'DeepSeek-V4.1-Flash (DSH)',
+    detail: 'DSH 模型 id：deepseek-flash · 原生多模态（桥接目前只转发文本）· 档位 off/low/high/max',
+    cost: { inputCost: '$0.3', outputCost: '$1.2', cacheCost: '$0.006' } },
+  { id: 'dsh-deepseek-v4-pro', name: 'DeepSeek-V4-Pro (DSH)',
+    detail: 'DSH 模型 id：deepseek-v4-pro（V4-Pro-0813）· 档位 off/low/high/max',
+    cost: { inputCost: '$1.32', outputCost: '$3.96', cacheCost: '$0.044' } }
+];
+
+/**
  * 注册 dsh 语言模型提供方（VS Code 1.94+，vscode.lm）。
  * @param {import('vscode').ExtensionContext} context
  */
@@ -3261,16 +3714,7 @@ function registerDshModelProvider(context) {
     // 与 vizards.deepseek-v4-for-copilot 对齐：VS Code 核心依据 provider 返回的
     // languageModelChatInformation 顶级字段渲染「推理档位」配置 pill。成本用合法货币串
     // （避免 '—' 这类非法值），reasoningEffort 属性带 group:'navigation'。
-    const dshModelDefs = [
-      { id: 'dsh', name: 'DSH (DeepSeek Harness)', detail: '默认：跟随 DSH 设置模型 · 档位可配',
-        cost: { inputCost: '$0.14', outputCost: '$0.28', cacheCost: '$0.0028' } },
-      { id: 'dsh-deepseek-v4-pro', name: 'DeepSeek-V4-Pro (DSH)', detail: 'DeepSeek 官方 · 档位 off/low/high/max',
-        cost: { inputCost: '$0.435', outputCost: '$0.87', cacheCost: '$0.003625' } },
-      { id: 'dsh-deepseek-v4-flash', name: 'DeepSeek-V4-Flash (DSH)', detail: 'DeepSeek 官方 · 档位 off/low/high/max',
-        cost: { inputCost: '$0.14', outputCost: '$0.28', cacheCost: '$0.0028' } },
-      { id: 'dsh-deepseek-v4-flash-vision-exp', name: 'deepseek-v4-flash-vision-exp (DSH)', detail: 'DeepSeek 官方视觉模型 · 档位 off/low/high/max',
-        cost: { inputCost: '$0.14', outputCost: '$0.28', cacheCost: '$0.0028' } }
-    ];
+    const dshModelDefs = DSH_MODEL_DEFS;
     const dshReasoningEffortSchema = {
       type: 'string',
       title: '推理档位',
@@ -3295,8 +3739,10 @@ function registerDshModelProvider(context) {
           version: '0.8.9',
           detail: m.detail,
           tooltip: 'DeepSeek Harness：在工作区解析任务、执行工具后解答；模型与推理档位可配置',
-          maxInputTokens: 250000,
-          maxOutputTokens: 128000,
+          // 上下文/输出上限对齐 DSH 侧实际模型配置（llm-deepseek：contextWindow 1000000、
+          // maxTokens 393216）——VS Code 据此决定塞给 DSH 的历史长度，写小了会静默截断。
+          maxInputTokens: 1000000,
+          maxOutputTokens: 393216,
           // 门控字段（对齐 vizards：isBYOK/isUserSelectable 让模型可被选、可配置）
           isBYOK: true,
           isUserSelectable: true,
@@ -3450,7 +3896,7 @@ function activate(context) {
 
       // DSH 页面（iframe）内点击外部链接时，由 dsh-open-links 插件通过
       // postMessage 逐级转发到这里，用系统默认浏览器打开。
-      view.webview.onDidReceiveMessage(handleWebviewMessage);
+      view.webview.onDidReceiveMessage((m) => handleWebviewMessage(m, view.webview));
 
       const cfgSub = vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration('dshPanel')) {
@@ -3531,7 +3977,7 @@ function activate(context) {
         render(activeView);
       }
     });
-    panel.webview.onDidReceiveMessage(handleWebviewMessage);
+    panel.webview.onDidReceiveMessage((m) => handleWebviewMessage(m, panel.webview));
 
     await reloadTab();
   });
@@ -3610,7 +4056,7 @@ function activate(context) {
       }
       view.description = getUrl();
       try {
-        view.webview.html = buildIframeHtml(target.displayUrl, getFontScale());
+        view.webview.html = buildIframeHtml(target.displayUrl, getFontScale(), fileLinkAction());
       } catch (e) {
         view.description = '无法加载';
         view.webview.html = buildErrorHtml(e.message);
@@ -3708,6 +4154,27 @@ module.exports.__internals = {
   startDshAndWaitReady,
   clipboardPluginFiles,
   CLIPBOARD_PLUGIN_NAME,
+  fileLinkPluginFiles,
+  fileLinkPluginVersion,
+  ensureFileLinkPlugin,
+  FILE_LINK_PLUGIN_NAME,
+  fileLinkAction,
+  buildIframeHtml,
+  handleWebviewMessage,
+  resolveWorkspaceTarget,
+  normalizeLinkPath,
+  isInsideFolder,
+  jsonForScript,
+  DSH_MODEL_DEFS,
+  resolveDshModelSelection,
+  findMissingDshModels,
+  checkDshModelDrift,
+  registerDshModelProvider,
+  dshRpc,
+  fetchSessionHistory,
+  dshEventText,
+  applyDshEvents,
+  replayDshAnswer,
   sanitizeCommand,
   getHost,
   getPort,

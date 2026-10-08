@@ -1,0 +1,39 @@
+{
+  "name": "dsh-vscode-file-links",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness 插件：点击对话里的工作区文件/文件夹链接时，把路径转发给外层宿主（VS Code 扩展 webview），由宿主在 VS Code 资源管理器中定位并打开。由 Deepseek-Harness-for-VS-Code 扩展内置分发。",
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "cordis",
+    "plugin",
+    "vscode",
+    "webview",
+    "file",
+    "link"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "platform": "web"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

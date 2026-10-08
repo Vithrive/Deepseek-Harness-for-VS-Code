@@ -227,6 +227,34 @@ async function main() {
     assert.strictEqual(selfStatus, 200, '重启后代理自检应为 200（无半就绪窗口）');
     console.log('    代理自检 → 200 ✓');
 
+    // [6] Copilot 桥接模型条目 ↔ DSH 在册模型：DSH 的 session.selectModel 用
+    // llm.listModels 校验模型 id，未登记的 id 会报 session/model-unavailable 并被扩展
+    // 静默回落成 DSH 默认模型（用户看不到报错）——所以用真实实例兜住这类改名漂移。
+    const mc = await getJson(pport, '/api/session/modelCatalog', 'POST', JSON.stringify({
+      type: 'client-request',
+      rpcId: 'e2e-mc-' + crypto.randomBytes(3).toString('hex'),
+      method: 'session/modelCatalog',
+      payload: { args: {} }
+    }));
+    assert.strictEqual(mc.status, 200, '经代理 session/modelCatalog 应 200');
+    const mcParsed = JSON.parse(mc.body);
+    assert.ok(mcParsed.result && mcParsed.result.ok === true && mcParsed.result.value && Array.isArray(mcParsed.result.value.groups),
+      'modelCatalog 应返回 groups：' + mc.body.slice(0, 200));
+    const official = mcParsed.result.value.groups.find((g) => g.id === 'deepseek-official');
+    if (official) {
+      const ids = official.models.map((m) => m.id);
+      console.log('[6] deepseek-official 在册模型：' + ids.join(', '));
+      for (const def of ext.__internals.DSH_MODEL_DEFS) {
+        const sel = ext.__internals.resolveDshModelSelection(def.id);
+        if (!sel) continue; // 'dsh' 条目跟随 DSH 设置，不固定模型
+        assert.ok(ids.includes(sel.model),
+          '桥接条目 ' + def.id + ' 映射的 ' + sel.model + ' 必须登记在 DSH 模型目录里（当前在册：' + ids.join(', ') + '）');
+        console.log('    ' + def.id + ' → ' + sel.provider + '/' + sel.model + ' ✓ 在册');
+      }
+    } else {
+      console.log('[6] 本机未配置 deepseek-official provider，跳过桥接模型对齐检查');
+    }
+
     console.log('\n端到端验证全部通过 ✓（测试实例即将清理）');
   } catch (e) {
     failed = e;

@@ -1,8 +1,8 @@
 {
   "name": "deepseek-harness-vscode",
   "displayName": "DeepSeek Harness for VSCode",
-  "description": "DeepSeek Harness (DSH) 的 VS Code 接入：侧边栏/标签页忠实呈现 DSH Web GUI 并自动检测启动，不影响用户对 DSH 本身的页面组织、第三方插件装配等二次开发行为；v0.7.13 起把 DSH 注册为 Copilot 聊天模型「DSH (DeepSeek Harness)、DeepSeek-V4-Pro (DSH)、DeepSeek-V4-Flash (DSH)……」——接收 Copilot 组织好的现成对话、滤除对话内容无关的 prompt、交给 DSH 二次组织、流式回写，旨在利用 DSH 强大的任务编排与工具调用能力，发挥最大性能",
-  "version": "0.8.45",
+  "description": "DeepSeek Harness (DSH) 的 VS Code 接入：侧边栏/标签页忠实呈现 DSH Web GUI 并自动检测启动，不影响用户对 DSH 本身的页面组织、第三方插件装配等二次开发行为；v0.7.13 起把 DSH 注册为 Copilot 聊天模型——模型选择器里出现 DeepSeek Harness 下属模型条目，接收 Copilot 组织好的现成对话、滤除对话内容无关的 prompt、交给 DSH 二次组织、流式回写，旨在利用 DSH 强大的任务编排与工具调用能力，发挥最大性能",
+  "version": "1.0.0",
   "publisher": "vithrive",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -71,6 +71,21 @@
           "default": true,
           "description": "自动安装内置 dsh-webview-clipboard 插件（修复 macOS 面板内复制/粘贴等编辑快捷键失效；Windows/Linux 上为惰性文件不影响行为）。若怀疑影响 dsh web 启动可关闭后对比"
         },
+        "dshPanel.workspaceFileLinkAction": {
+          "type": "string",
+          "default": "revealAndOpen",
+          "enum": [
+            "revealAndOpen",
+            "revealOnly",
+            "off"
+          ],
+          "enumDescriptions": [
+            "点击 DSH 对话里的工作区文件/文件夹链接时，在 VS Code 资源管理器中定位并打开（文件打开编辑器，文件夹仅定位）",
+            "只在本窗口的 VS Code 资源管理器中定位并选中，不额外打开编辑器",
+            "不接管：保持 DSH 自身行为（在 DSH 侧边栏打开）。此时也不会安装配套插件 dsh-vscode-file-links"
+          ],
+          "description": "DSH 对话里的工作区文件/文件夹链接点击行为（自动安装配套插件 dsh-vscode-file-links 实现）。只有目标位于当前 VS Code 工作区内且真实存在时才接管，否则保持 DSH 侧边栏打开；按住 Ctrl/Cmd/Shift/Alt 点击可临时走 DSH 侧边栏"
+        },
         "dshPanel.autoInstallDsh": {
           "type": "boolean",
           "default": true,
@@ -99,7 +114,7 @@
         "dshPanel.chatModel": {
           "type": "string",
           "default": "",
-          "description": "DSH (DeepSeek Harness) 模型条目使用的模型 id（与 chatProvider 配合，如 deepseek-v4-pro）；留空=跟随 DSH 默认模型"
+          "description": "DSH (DeepSeek Harness) 模型条目使用的模型 id（与 chatProvider 配合，如 deepseek-flash、deepseek-v4-pro）；留空=跟随 DSH 默认模型"
         },
         "dshPanel.chatTimeoutMs": {
           "type": "number",

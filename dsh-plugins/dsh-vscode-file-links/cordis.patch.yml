@@ -1,0 +1,5 @@
+# dsh-vscode-file-links bundle patch: one insert registering the dual-face plugin.
+# The row name must match the npm package name and the host half's exported `name`.
+- insert:
+    - id: vscode-file-links
+      name: 'dsh-vscode-file-links'

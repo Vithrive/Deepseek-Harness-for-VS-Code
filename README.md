@@ -3,13 +3,13 @@
 一个零依赖的 VS Code 扩展，把 **DeepSeek Harness (DSH)** 接入 VS Code 的两种形态：
 
 1. **忠实窗口**：把 DSH 的 Web GUI 原样内嵌到 VS Code 侧边栏 / 辅助侧边栏 / 编辑器标签页，自动检测、启动 DSH 服务——不注入脚本、不改写界面、不拦截交互，不影响你对 DSH 的页面组织、第三方插件装配等任何二次开发行为；
-2. **Copilot 桥接（v0.7.13 起，早期版本）**：把 DSH 注册为 VS Code 聊天模型——模型选择器里出现 **DSH (DeepSeek Harness)、DeepSeek-V4-Pro (DSH)、DeepSeek-V4-Flash (DSH)、deepseek-v4-flash-vision-exp (DSH)** 等条目，选中即可在 Copilot Chat 里借助 DSH 强大的任务编排与工具调用能力解题。
+2. **Copilot 桥接（v0.7.13 起）**：把 DSH 注册为 VS Code 聊天模型——模型选择器里出现 **DeepSeek Harness 下属模型** 条目（`DSH (DeepSeek Harness)` 跟随 DSH 设置里的默认模型，其余条目固定对应 DeepSeek 官方现役模型，条目名随 DeepSeek 模型版本更新），选中即可在 Copilot Chat 里借助 DSH 强大的任务编排与工具调用能力解题。
 
 > **Copilot 桥接不影响「忠实窗口」形态**——它只是为便捷编程而做的功能提升；你不选这些模型条目时，一切与没有桥接功能时完全一样。
 
 如果喜欢本扩展请转至 [Deepseek-Harness-for-VS-Code](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code) 星标助力；对 Chrome Extension 有需求也请关注 [Deepseek-Harness-for-Chrome](https://github.com/Vithrive/Deepseek-Harness-for-Chrome)。
 
-> **版本适配**：本扩展 **v0.8.34 起**适配 **dsh v0.1.2-rc.1 及以上版本**——自动完成该版本起新增的 Web 浏览器认证（扩展受管认证代理，面板与 Copilot 桥接全程免登录、免打扰，详见下文「dsh web 浏览器认证」）；同时**向下兼容**未启用认证的旧版 dsh（启动参数探测、RPC 端点新旧格式自动回退）。
+> **版本适配**：本扩展 **v0.8.34 起**适配 **dsh v0.1.2-rc.1 及以上版本**——自动完成该版本起新增的 Web 浏览器认证（扩展受管认证代理，面板与 Copilot 桥接全程免登录、免打扰，详见下文「dsh web 浏览器认证」）；同时**向下兼容**未启用认证的旧版 dsh（启动参数探测、RPC 端点新旧格式自动回退）。**1.0.0 起**同步适配 **dsh 0.2.x** 的回答事件通道（`assistant/message`，旧的 `assistant/chunk` 仍兼容），并跟随 DeepSeek 现役模型（`deepseek-flash` = V4.1-Flash、`deepseek-v4-pro`）。
 
 ## 🙏 致谢
 
@@ -43,6 +43,7 @@
 - 面板按钮：刷新（不打断运行中的任务）/ 重启 dsh web / 在浏览器中打开；字号跟随 `editor.fontSize` 等比缩放（CSS zoom 实现，非整数倍缩放同样清晰）；
 - **发送选中内容 / 拖放文件到 DSH 对话框**（自动安装配套插件 `dsh-drop-caret`）：把文件、文件夹、代码段以 `路径:行号` 引用精确插入对话框光标处——**从 VS Code 资源管理器拖拽直接引用源文件本身**（不产生副本）；从系统文件管理器拖入时浏览器无法取得真实路径，此时才回退为工作区 `.dsh-drop/` 下的内容快照。点击 DSH 对话中的外链在系统浏览器打开（配合 DSH 插件 `dsh-open-links`）。
 - **macOS 剪贴板快捷键修复（自动安装配套插件 `dsh-webview-clipboard`）**：修复 macOS 上面板内 ⌘C/⌘V/⌘X 失效的问题——DSH 页面以跨源 iframe 内嵌于 webview 时，浏览器的原生剪贴板默认动作不会发生。插件注入 DSH 页面后拦截这三个键并经 execCommand 显式执行。仅 macOS + 被内嵌时启用，其余环境行为不变。
+- **点击对话里的工作区文件/文件夹链接 → 在 VS Code 资源管理器中定位并打开（自动安装配套插件 `dsh-vscode-file-links`，v0.8.46 起）**：模型回答里的 `src/a.ts`、`docs/` 这类工作区相对路径链接，原本点击后会在 DSH 侧边栏打开；现在在面板内点击会改为在本窗口的**资源管理器**中定位并打开（文件同时打开编辑器，文件夹仅定位）。**前提**：目标必须位于当前 VS Code 打开的工作区内且真实存在——不满足时自动回落到原来的 DSH 侧边栏行为，绝不出现「点了没反应」。详见下文专节。
 
 ### 使用示例：发送选中内容到对话框
 
@@ -72,6 +73,31 @@
 | `dshPanel.killOnDispose` | `true` | 扩展停用时是否结束它启动的 dsh |
 | `dshPanel.openSystemBrowser` | `false` | 扩展启动 dsh 时是否保留弹系统浏览器的旧行为 |
 | `dshPanel.installClipboardPlugin` | `true` | 自动安装内置 `dsh-webview-clipboard` 插件（修复 macOS 面板内编辑快捷键；Windows/Linux 上为惰性文件不影响行为）。怀疑影响 dsh web 启动时可关闭对比 |
+| `dshPanel.workspaceFileLinkAction` | `revealAndOpen` | 对话里工作区文件/文件夹链接的点击行为：`revealAndOpen` 资源管理器定位并打开 / `revealOnly` 仅定位 / `off` 不接管（保持 DSH 侧边栏打开，也不安装配套插件） |
+
+### 点击对话里的文件/文件夹链接 → 在 VS Code 资源管理器中定位（v0.8.46 起）
+
+模型回答里的工作区路径链接（指向 `src/a.ts`、`docs/` 这类路径的 Markdown 链接）在 DSH 里是
+可点击的：DSH 会把它们打开在自己的右侧边栏。本扩展在面板内把这一点击改接到 VS Code：
+
+| 场景 | 行为 |
+| --- | --- |
+| 目标在当前 VS Code 工作区内且存在 | 资源管理器中定位并选中；文件同时用**非预览标签页**打开编辑器（文件夹只定位） |
+| 目标不在工作区内（或不存在） | 自动回落到 DSH 自身行为：在 DSH 侧边栏打开，并在状态栏提示「不在当前 VS Code 工作区内」 |
+| 按住 `Ctrl`/`Cmd`/`Shift`/`Alt` 再点击 | 始终走 DSH 侧边栏（临时绕过接管） |
+| 在系统浏览器里打开 DSH（非面板内） | 完全不介入，行为与以前一致 |
+| `dshPanel.workspaceFileLinkAction` = `off` | 完全不接管，行为与以前一致 |
+
+实现方式与「忠实窗口」原则的边界：
+
+- 由内置插件 `dsh-vscode-file-links` 在 DSH 页面内**只监听**「文件链接按钮」的点击
+  （DSH 的 `MarkdownFileLink` 按钮，`title` 就是链接目标路径），其余 DOM 一律不碰；
+- 点击路径经 `postMessage` 逐级转发：DSH 页面 → webview → 扩展宿主；扩展宿主解析路径
+  （相对路径对每个工作区文件夹依次尝试，绝对路径与 `../` 越界一律拒绝）并执行
+  `revealInExplorer` / `vscode.open`，再把结果回执原路返回；
+- 插件只在收到面板握手回执（`ack`）后才接管；`off` 时面板不给回执，插件保持惰性；
+- 首次安装/升级该插件后，需点击面板顶部「重启 dsh web」使其加载（扩展会提示）；
+- 已知限制：DSH 的链接行号（如 `src/a.ts#L12`）不参与定位，打开的编辑器停在第 1 行。
 
 ### dsh web 浏览器认证（v0.8.35 起，自动完成，无需任何操作）
 
@@ -111,14 +137,28 @@ dsh `0.1.2-rc` 起为 Web GUI 启用了浏览器认证：每次 `dsh web` 启动
 
 ### 快速上手
 
-1. 打开 Chat 面板（`Ctrl+Alt+I`）→ 模型选择器（`Ctrl+Alt+.`）里选择 **DSH (DeepSeek Harness)**（或直接选 **DeepSeek-V4-Pro (DSH)** 等固定条目）；
+1. 打开 Chat 面板（`Ctrl+Alt+I`）→ 模型选择器（`Ctrl+Alt+.`）里选择 **DeepSeek Harness 下属模型**（`DSH (DeepSeek Harness)`，或任一固定的 DeepSeek 官方模型条目）；
 2. 直接提问，例如「帮我分析这个项目的数据」——DSH 用其配置的模型在工作区执行任务、调用工具解题，答案**流式回写**聊天框；
 3. 每个 Copilot 聊天对应一个 DSH 会话：**新聊天自动新建 DSH 会话，同一聊天内持续追问复用同一会话**；你可以在 DSH 面板里实时看到完整执行过程。
 
 ### 模型与推理档位
 
-- **模型**：`DSH (DeepSeek Harness)` 条目默认跟随 DSH 设置里的默认模型（`agent-default-model`）；也可用 `dshPanel.chatProvider` / `dshPanel.chatModel` 指定（如 `deepseek-official` / `deepseek-v4-pro`，需先在 DSH 设置中配置好对应 provider）。模型选择器里的 **DeepSeek-V4-Pro (DSH)** 等条目则固定对应 DeepSeek 官方模型。
+- **模型**：`DSH (DeepSeek Harness)` 条目默认跟随 DSH 设置里的默认模型（`agent-default-model`）；也可用 `dshPanel.chatProvider` / `dshPanel.chatModel` 指定（如 `deepseek-official` / `deepseek-flash`，需先在 DSH 设置中配置好对应 provider）。其余条目是 **DeepSeek Harness 下属模型**里的固定项——固定对应 DeepSeek 官方**现役**模型，条目名随 DeepSeek 模型更新（当前映射见下表）。
 - **推理档位（reasoningEffort）**：在聊天界面的模型配置里选择（off / low / high / max，与 DSH 会话同步生效）；`dshPanel.dshReasoningEffort` 作为兜底配置。
+
+#### 与 DeepSeek 现役模型的对应关系（1.0.0）
+
+DeepSeek 于 2026-09-10 发布 **DeepSeek-V4.1-Flash**（原生多模态），并把旧的 V4 Flash、V4 Flash Vision Exp 两个模型**退役**为兼容路由（旧模型名仍可用，请求由 V4.1-Flash 承接、按 Flash 计价）——因此模型选择器里只保留现役条目（当前 DeepSeek Harness 下属模型）：
+
+| VS Code 模型条目 | DSH 侧模型 id | 说明 |
+| --- | --- | --- |
+| `DSH (DeepSeek Harness)` | 跟随 DSH 设置 | 当前 DSH 默认即 `deepseek-flash`（V4.1-Flash） |
+| `DeepSeek-V4.1-Flash (DSH)` | `deepseek-flash` | 1M 上下文、原生多模态（桥接目前只转发文本） |
+| `DeepSeek-V4-Pro (DSH)` | `deepseek-v4-pro` | DeepSeek-V4-Pro-0813 |
+
+> DSH 的 `session.selectModel` 会校验模型是否登记在 `llm-deepseek` 配置里，未登记的 id 会报 `session/model-unavailable` 并被扩展**静默**回落成 DSH 默认模型——所以映射用的是「DSH 侧真实模型 id」而非 DeepSeek API 的兼容旧名。v0.8.48 起每次会话首次提问还会做一次漂移自检（读 DSH 的 `session/modelCatalog`），映射失配时直接弹告警而不是继续静默。
+>
+> 条目名与映射随 DeepSeek 模型更新：0.8.47 及更早的 `DeepSeek-V4-Flash (DSH)` / `deepseek-v4-flash-vision-exp (DSH)` 条目已移除，若旧会话/设置里仍留存这些条目 id，扩展仍会把它们解析到 `deepseek-flash`。发现下拉框里的名字与实际模型不符时，通常意味着需要升级本扩展。
 
 ### 切换模型再切回
 
@@ -139,7 +179,7 @@ Copilot 会话中途切到其他自定义模型问答、再切回 DSH 模型时�
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `dshPanel.enableDshModel` | `true` | 是否注册 DSH 聊天模型条目（关闭则桥接不生效，面板不受影响） |
-| `dshPanel.chatProvider` / `dshPanel.chatModel` | 空 | `DSH (DeepSeek Harness)` 条目使用的 provider / 模型（如 `deepseek-official` / `deepseek-v4-pro`）；留空跟随 DSH 默认 |
+| `dshPanel.chatProvider` / `dshPanel.chatModel` | 空 | `DSH (DeepSeek Harness)` 条目使用的 provider / 模型（如 `deepseek-official` / `deepseek-flash`）；留空跟随 DSH 默认 |
 | `dshPanel.chatAgentPreset` | 空 | DSH 会话创建时使用的 agent 预设（如 `liangshen`）；留空=DSH 默认 |
 | `dshPanel.dshReasoningEffort` | 空 | 推理档位兜底：off / low / high / max；界面选择优先 |
 | `dshPanel.chatTimeoutMs` | `900000` | 单次任务最长等待毫秒数（15 分钟），超时后任务仍在 DSH 面板运行 |
@@ -165,10 +205,16 @@ Copilot Chat（VS Code 组织好的对话）
         │  session.create / session.prompt / session.history（DSH RPC）
         ▼
 DSH：用自己的一套 harness（记忆 / 技能 / AGENTS.md / 工具 / agent 预设）二次组织，交给配置的模型执行
-        │  流式事件（text-delta）
+        │  会话事件流（assistant/message 的 text 块；旧版 dsh 为 assistant/chunk 的 text-delta）
         ▼
 本扩展：增量流式回写 Copilot 聊天框
 ```
+
+> **回答通道（v0.8.49 修复）**：dsh 0.2.x 起助手正文改为「每个 step 一条 `assistant/message`」
+> 事件（正文在 `data.message.content` 的 `text` 块里，`reasoning` / `tool-call` 块不外发），
+> 旧的 `assistant/chunk` 增量通道已不再发送。扩展现在两代协议都认：新协议按消息回写，
+> 旧协议仍按 `text-delta` 增量回写（历史回放里只有整块 `block-end` 时用整块文本、不重复）。
+> 若某一轮结束却没有任何正文，会在回答里明确提示，而不是静默空白。
 
 要点：
 
@@ -186,11 +232,12 @@ DSH：用自己的一套 harness（记忆 / 技能 / AGENTS.md / 工具 / agent 
 
 ## 🌱 版本状态声明
 
-Copilot 桥接是**早期版本**，但已经过充分测试、**功能完全可用**：
+**1.0.0 是第一个正式版本**：忠实窗口（面板）与 Copilot 桥接两条能力线都已长期自用 + 回归测试覆盖，功能完整可用：
 
+- 两条能力线：**忠实窗口**（把 DSH Web GUI 原样内嵌到侧边栏 / 编辑器标签页）与 **Copilot 桥接**（把 DSH 注册为 VS Code 聊天模型）——桥接仍在持续跟进 DeepSeek 模型与 dsh 版本演进，遇到不一致会在扩展内明确告警而不是静默降级；
 - 欢迎大家在不同操作系统（Windows / macOS / Linux，以及 Remote-SSH、WSL、Dev Containers 等远程场景）中测试使用；
 - 如遇问题请在 [GitHub Issues](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/issues) 提出，作者会尽快回复和改进；
-- 再次强调：**Copilot 桥接不影响「忠实窗口」形态**——面板始终忠实呈现 DSH Web GUI，不对页面注入、改写或拦截任何东西，也不干涉你对 DSH 的插件开发与界面定制。
+- 再次强调：**Copilot 桥接不影响「忠实窗口」形态**——面板始终忠实呈现 DSH Web GUI，不对页面注入、改写或拦截任何东西，也不干涉你对 DSH 的插件开发与界面定制。（唯二的例外是两个可关闭的配套插件：修复 macOS 剪贴板快捷键的 `dsh-webview-clipboard`，以及把对话里的工作区文件链接改接到 VS Code 资源管理器的 `dsh-vscode-file-links`，两者都由本扩展随包分发、可一键关闭。）
 
 ---
 
