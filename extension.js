@@ -4123,7 +4123,19 @@ function activate(context) {
     vscode.window.showInformationMessage('已重置 DSH 会话映射：下次提问将创建新的 DSH 会话。');
   });
 
-  context.subscriptions.push(viewSub, openInTabCmd, refreshCmd, openBrowserCmd, restartCmd, wsSub, sendSelectionCmd, chatStatusCmd, diagnoseModelsCmd, resetChatCmd);
+  // 编辑器右上角按钮：唤起 DSH 面板（优先侧边栏，回退到标签页）
+  const openInSidebarCmd = vscode.commands.registerCommand('dshPanel.openInSidebar', async () => {
+    try {
+      await vscode.commands.executeCommand('workbench.view.extension.dsh-panel');
+      if (!activeView && !activeTab) {
+        await vscode.commands.executeCommand('dshPanel.openInTab');
+      }
+    } catch (_e) {
+      await vscode.commands.executeCommand('dshPanel.openInTab');
+    }
+  });
+
+  context.subscriptions.push(viewSub, openInTabCmd, refreshCmd, openBrowserCmd, restartCmd, wsSub, sendSelectionCmd, chatStatusCmd, diagnoseModelsCmd, resetChatCmd, openInSidebarCmd);
 }
 
 function deactivate() {
