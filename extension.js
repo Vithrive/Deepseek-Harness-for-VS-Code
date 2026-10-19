@@ -4123,16 +4123,58 @@ function activate(context) {
     vscode.window.showInformationMessage('已重置 DSH 会话映射：下次提问将创建新的 DSH 会话。');
   });
 
-  // 编辑器右上角按钮：唤起 DSH 面板（优先侧边栏，回退到标签页）
+  // 编辑器右上角按钮：在右侧打开 DSH 面板（类似 Claude Code / Codex）
   const openInSidebarCmd = vscode.commands.registerCommand('dshPanel.openInSidebar', async () => {
-    try {
-      await vscode.commands.executeCommand('workbench.view.extension.dsh-panel');
-      if (!activeView && !activeTab) {
-        await vscode.commands.executeCommand('dshPanel.openInTab');
-      }
-    } catch (_e) {
-      await vscode.commands.executeCommand('dshPanel.openInTab');
+    if (activeTab) {
+      activeTab.reveal();
+      return;
     }
+    // 强制在右侧列打开，与 Claude Code 行为一致
+    const panel = vscode.window.createWebviewPanel(
+      'dsh.tab',
+      'DeepSeek Harness',
+      vscode.ViewColumn.Two,
+      { enableScripts: true, retainContextWhenHidden: true }
+    );
+    activeTab = panel;
+    if (activeView) {
+      activeView.description = '在标签页中打开';
+      activeView.webview.html = buildSuspendedHtml();
+    }
+    let disposed = false;
+    const reloadRight = async () => {
+      if (disposed) return;
+      panel.webview.html = buildLoadingHtml();
+      try {
+        const r = await preparePanelHtml(true);
+        if (disposed) return;
+        panel.webview.html = r.ok ? r.html : buildErrorHtml(r.reason);
+      } catch (e) {
+        if (disposed) return;
+        console.error('[DeepSeek Harness] 右侧面板渲染失败：', e);
+        panel.webview.html = buildErrorHtml('右侧面板渲染失败：' + (e && e.message ? e.message : String(e)));
+      }
+    };
+    tabReloadFn = reloadRight;
+
+    const cfgSub = vscode.workspace.onDidChangeConfiguration((e) => {
+      if (disposed) return;
+      if (e.affectsConfiguration('dshPanel')) { reloadRight(); }
+      else if (e.affectsConfiguration('editor.fontSize')) {
+        panel.webview.postMessage({ type: 'dsh-font-scale', scale: getFontScale() });
+      }
+    });
+
+    panel.onDidDispose(() => {
+      disposed = true;
+      cfgSub.dispose();
+      if (activeTab === panel) activeTab = null;
+      if (tabReloadFn === reloadRight) tabReloadFn = null;
+      if (activeView) { render(activeView); }
+    });
+    panel.webview.onDidReceiveMessage((m) => handleWebviewMessage(m, panel.webview));
+
+    await reloadRight();
   });
 
   context.subscriptions.push(viewSub, openInTabCmd, refreshCmd, openBrowserCmd, restartCmd, wsSub, sendSelectionCmd, chatStatusCmd, diagnoseModelsCmd, resetChatCmd, openInSidebarCmd);
