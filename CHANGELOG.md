@@ -2,6 +2,10 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。完整提交历史见 [GitHub](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/commits/main)。
 
+## 未发布
+
+- **新增：三套内置配色主题（DSH Light / DSH Dark / DSH Abyss）**——从 DSH 视觉方案移植，经 `contributes.themes` 直接注册，安装扩展即可在配色主题列表中选择，无需额外安装主题扩展。
+
 ## 1.0.0 —— 第一个正式版本
 
 **Copilot 桥接**
