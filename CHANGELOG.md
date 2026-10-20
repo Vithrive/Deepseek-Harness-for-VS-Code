@@ -2,6 +2,10 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。完整提交历史见 [GitHub](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/commits/main)。
 
+## 未发布
+
+- **新增：产品图标主题 `DSH Product Icons`**——从 DSH 客户端 `ui-primitives` 提取 98 个产品图标（描边几何原样保留，统一 16×16 网格、`1px` 描边），覆盖 VS Code 390 个产品图标 id 中的 222 个；其余无图形语义对应的 id 继续用 VS Code 自带图标。图标同时以保留 `stroke` 的独立 SVG（`media/dsh-product-icons/*.svg`）与同一几何转轮廓打包的图标字体（`woff2`/`woff`）交付，SVG 可直接当素材复用。
+
 ## 1.0.0 —— 第一个正式版本
 
 **Copilot 桥接**

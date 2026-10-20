@@ -33,6 +33,13 @@
         "displayName": "DeepSeek Harness"
       }
     ],
+    "productIconThemes": [
+      {
+        "id": "dsh-product-icons",
+        "label": "DSH Product Icons",
+        "path": "./media/dsh-product-icons/dsh-product-icon-theme.json"
+      }
+    ],
     "configuration": {
       "title": "DeepSeek Harness Panel",
       "properties": {

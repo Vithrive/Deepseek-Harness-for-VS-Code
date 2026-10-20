@@ -133,6 +133,28 @@ dsh `0.1.2-rc` 起为 Web GUI 启用了浏览器认证：每次 `dsh web` 启动
 
 ---
 
+## 🎛 产品图标主题（DSH Product Icons）
+
+扩展内置一套 **`DSH Product Icons`** 产品图标主题，把 DSH 自己的图标语言带进 VS Code 的活动栏、视图标题、侧边栏与命令界面：
+
+- **来源**：直接提取自 DSH 客户端 `ui-primitives` 的产品图标集（描边几何原样保留，统一 16×16 网格、`1px` 描边）；
+- **覆盖**：VS Code 对外暴露的 390 个产品图标 id 中，**222 个**由 DSH 图形接管；
+- **不做过度映射**：剩下 168 个没有图形语义对应的 id（调试断点、断点条件、布局面板细分图标等）继续用 VS Code 自带图标，而不是硬套一个「差不多」的形状——宁可少覆盖，也不给错误暗示。
+
+启用方式：`Ctrl/Cmd+Shift+P` → **Preferences: Product Icon Theme** → 选 **DSH Product Icons**。
+
+### 资源组织
+
+`media/dsh-product-icons/` 同时存放两种形态，共用同一份几何：
+
+| 文件 | 作用 |
+| --- | --- |
+| `*.svg` | 98 个独立矢量图标，保留 `stroke` 描边与 `currentColor`，可直接当素材取用 |
+| `dsh-product-icons.woff2` / `.woff` | 由同一批图形转轮廓打包的图标字体，供 VS Code 界面读取 |
+| `dsh-product-icon-theme.json` | 主题本身，把产品图标 id 指向字形码位 |
+
+> **为什么要字体**：VS Code 的产品图标主题只能通过 `fonts` + `fontCharacter` 取字形，没有直接用 SVG 文件的字段（见 VS Code 源码中 `vscode://schemas/product-icon-theme` 的 schema）。因此 SVG 作为可读、可复用的素材保留，字体则作为 VS Code 实际渲染的载体，两者从同一几何生成，不会出现漂移。
+
 ## 🧭 Copilot 桥接：操作指南
 
 ### 快速上手
