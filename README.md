@@ -133,6 +133,20 @@ dsh `0.1.2-rc` 起为 Web GUI 启用了浏览器认证：每次 `dsh web` 启动
 
 ---
 
+## 🎨 配色主题（DSH Light / Dark / Abyss）
+
+扩展内置三套源自 DSH 视觉语言的配色主题，安装后即刻出现在 VS Code 的配色主题列表里，无需额外安装主题扩展：
+
+| 主题 | 类型 | 编辑器背景 | 说明 |
+| --- | --- | --- | --- |
+| DSH Light | 浅色（`vs`） | `#FFFFFF` | 对应 DSH 浅色表面 |
+| DSH Dark | 深色（`vs-dark`） | `#151517` | 冷灰基调（`neutralBluish`） |
+| DSH Abyss | 深色（`vs-dark`） | `#0F0F0F` | 更深的纯灰变体（`neutral`，不偏蓝） |
+
+切换：`Ctrl/Cmd+K` `Ctrl/Cmd+T`（或 `Ctrl+Shift+P` → `Preferences: Color Theme`），搜索 **DSH** 即可。主题文件位于 `themes/`，由 `package.json` 的 `contributes.themes` 注册。
+
+---
+
 ## 🧭 Copilot 桥接：操作指南
 
 ### 快速上手

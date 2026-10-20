@@ -33,6 +33,23 @@
         "displayName": "DeepSeek Harness"
       }
     ],
+    "themes": [
+      {
+        "label": "DSH Light",
+        "uiTheme": "vs",
+        "path": "./themes/dsh-light-color-theme.json"
+      },
+      {
+        "label": "DSH Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/dsh-dark-color-theme.json"
+      },
+      {
+        "label": "DSH Abyss",
+        "uiTheme": "vs-dark",
+        "path": "./themes/dsh-abyss-color-theme.json"
+      }
+    ],
     "configuration": {
       "title": "DeepSeek Harness Panel",
       "properties": {
