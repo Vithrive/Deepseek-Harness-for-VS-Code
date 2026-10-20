@@ -153,6 +153,11 @@
             "max"
           ],
           "description": "DSH 模型的推理档位兜底配置（reasoningEffort）：off/low/high/max；聊天界面选择优先，此配置仅在界面未选择时生效；留空=跟随 DSH 默认档位"
+        },
+        "dshPanel.enableDshChat": {
+          "type": "boolean",
+          "default": true,
+          "description": "把 DeepSeek Harness 注册为聊天参与者（@DeepSeek Harness），与 Codex / Claude Code 平行出现在对话入口（VS Code 1.98+）"
         }
       }
     },
@@ -254,6 +259,16 @@
           "group": "navigation"
         }
       ]
-    }
+    },
+    "chatParticipants": [
+      {
+        "id": "dsh",
+        "name": "DeepSeek Harness",
+        "fullName": "DeepSeek Harness",
+        "description": "在工作区解析任务、执行工具后解答（DSH 引擎）",
+        "isSticky": true,
+        "icon": "media/icon.svg"
+      }
+    ]
   }
 }
