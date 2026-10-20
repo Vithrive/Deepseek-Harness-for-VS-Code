@@ -110,7 +110,8 @@ dsh `0.1.2-rc` 起为 Web GUI 启用了浏览器认证：每次 `dsh web` 启动
 - 启动 dsh 时默认附加 `--no-open`，不再弹出系统浏览器（需要旧行为时打开 `dshPanel.openSystemBrowser`）；
 - 如果 dsh 是**在本扩展之外启动**的（拿不到它的令牌），首次打开面板会提示一次，二选一：「重启并自动认证（推荐）」由扩展接管 dsh，此后恢复完全静默；或把终端里 `dsh web:` 打印的认证链接整行粘贴进来；
 - 「在浏览器中打开」按钮会自动携带当前令牌，系统浏览器可正常换取自己的 Cookie；
-- Remote / 非回环地址场景不启用代理（认证须在 dsh 所在机器的浏览器完成一次），行为与旧版一致。
+- **真远程（Remote-SSH / Dev Containers）同样启用代理**：扩展宿主与 dsh 同机，`127.0.0.1` 就是 dsh 所在机器的回环，前提与本地一致；代理监听的回环随机端口会再经 `vscode.env.asExternalUri` 转发一次（首次多弹一次「允许转发端口」确认），面板与 Copilot 桥接照常无感认证；
+- 仅当 `dshPanel.url` 指向**非回环地址**（例如外部域名、别的机器）时不启用代理，此时需要在 dsh 所在机器的浏览器里完成一次认证。
 
 ### 对旧版本 dsh 的兼容（无认证版本）
 
@@ -127,7 +128,8 @@ dsh `0.1.2-rc` 起为 Web GUI 启用了浏览器认证：每次 `dsh web` 启动
 
 1. 自动检测并安装服务器端的 dsh（`npm install -g @deepseek-ai/dsh`，要求服务器已装 Node.js 与 npm）；
 2. 自动端口转发：通过 `vscode.env.asExternalUri` 把远程 `127.0.0.1:3080` 暴露到本地，iframe 直接加载，无需手动配 SSH 隧道（首次转发确认允许即可）；
-3. dsh 以远程工作区为 cwd 启动并自动注册。
+3. dsh 以远程工作区为 cwd 启动并自动注册；
+4. dsh `0.1.2-rc` 起的 Web 浏览器认证同样自动完成：受管认证代理在服务器端 `127.0.0.1` 随机端口上换发 Cookie，该端口再经一次 `asExternalUri` 转发给面板（多一次「允许转发端口」确认），面板与 Copilot 桥接照常免登录。
 
 如果 DSH 跑在另一台机器、且不是通过 VS Code Remote 连接的，可手动建隧道：`ssh -L 3080:127.0.0.1:3080 user@server`，并把 `dshPanel.autoStart` 设为 `false`。
 

@@ -444,20 +444,57 @@ async function registerWorkspace() {
 // 扩展捕获 stdout 里的令牌链接，在本机回环随机端口启动「认证代理」，由代理
 // 完成令牌→Cookie 换发，随后给每个转发请求注入 Cookie 与 Host。webview 与
 // 扩展自身的 /api 调用全部改走代理——不关闭 dsh 任何安全机制，全程无感。
+//
+// 代理监听在「dsh 所在机器」的回环上，而 webview 跑在客户端：
+//   - 本地窗口 / WSL Remote：客户端可直达那个回环，代理地址直接用；
+//   - Remote-SSH / Dev Container：客户端走不到远端回环，须把代理地址再经一次
+//     asExternalUri 端口转发（见 forwardToClient），面板才拿得到注入 Cookie 的链路。
+// 两类真远程因此同样启用代理——否则面板只能直连裸地址，必然 401。
 // =====================================================================
 
 const AUTH_PROXY_STATE_KEY = 'dsh.webAuth.tokenCache';
 
-/** 是否为本地（或 WSL Remote——宿主与 dsh 同机回环）且 dshPanel.url 指向回环地址的场景。 */
+/**
+ * 是否为「扩展宿主与 dsh 同机、且 dshPanel.url 指向回环地址」的场景。
+ * 本地、WSL Remote、Remote-SSH、Dev Containers 都成立：`extensionKind` 为 `workspace`
+ * 时，扩展宿主就跑在 dsh 所在的那台机器（或容器）里，`127.0.0.1` 即那台机器的回环，
+ * 认证代理的前提与本地完全等价。区别只在于客户端能否直达这个回环：
+ * 真远程场景需要把代理端口再转发一次，由 forwardToClient() 处理。
+ * @returns {boolean}
+ */
 function isLocalLoopbackTarget() {
   try {
-    // WSL Remote 除外：扩展宿主与 dsh 同在 WSL 内（同机回环），代理前提与本地等价；
-    // 镜像网络 / VS Code 端口转发下 Windows 侧 webview 可达 WSL 的 127.0.0.1。
-    if (vscode.env && vscode.env.remoteName && vscode.env.remoteName !== 'wsl') return false;
     const u = new URL(getUrl());
     return ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(u.hostname);
   } catch {
     return false;
+  }
+}
+
+/**
+ * 客户端（webview / 系统浏览器）与扩展宿主是否不在同一个回环域，因而需要端口转发。
+ * 本地窗口与 WSL Remote 不需要（WSL 的 127.0.0.1 从 Windows 侧可达）；
+ * Remote-SSH / Dev Containers 等真远程需要。
+ * @returns {boolean}
+ */
+function needsClientForwarding() {
+  return !!(vscode.env && vscode.env.remoteName && vscode.env.remoteName !== 'wsl');
+}
+
+/**
+ * 把只有扩展宿主本机可达的地址（如认证代理的回环随机端口）转换为客户端可达地址：
+ * 真远程场景经 `vscode.env.asExternalUri` 建立端口转发（首次会弹一次「允许转发端口」
+ * 确认），其余场景原样返回。转发失败时退回原地址，由调用方的探测逻辑兜底。
+ * @param {string} url
+ * @returns {Promise<string>}
+ */
+async function forwardToClient(url) {
+  if (!needsClientForwarding()) return url;
+  try {
+    const external = await vscode.env.asExternalUri(vscode.Uri.parse(url));
+    return external.toString();
+  } catch {
+    return url;
   }
 }
 
@@ -512,8 +549,9 @@ function learnDshToken(tokenOrUrl) {
 }
 
 /**
- * 确保本地受管认证代理已启动（127.0.0.1 随机端口，仅本机可访问）。
- * Remote 场景或目标非回环地址时返回 null（维持原直连行为）。
+ * 确保受管认证代理已启动（绑定 dsh 所在机器的 127.0.0.1 随机端口，仅本机可访问）。
+ * 目标地址非回环时返回 null（维持原直连行为）；真远程场景代理照常创建，展示地址
+ * 由 resolvePanelTarget 再经端口转发暴露给客户端。
  * @returns {Promise<object|null>}
  */
 async function ensureAuthProxy() {
@@ -899,11 +937,12 @@ function probeDirectIndexStatus(timeoutMs = 4000) {
 
 /**
  * 为面板解析最终展示地址：
- * - 代理可用且 Cookie 就绪 → 代理地址（webview 由此获得无感认证）；
+ * - 代理可用且 Cookie 就绪 → 代理地址（webview 由此获得无感认证；真远程再经
+ *   asExternalUri 转发一次，客户端 webview 才可达）；
  * - 代理可用但未认证且上游 401 → { unauthorized: true }（引导接管）；
- * - 无代理（真远程/非回环）但直连探测到 401 → { unauthorized: true }（让中文引导
+ * - 无代理（目标非回环）但直连探测到 401 → { unauthorized: true }（让中文引导
  *   与「在浏览器中打开（携带令牌）」可达，不再让用户面对英文 401 原文）；
- * - 其余（本地老版 dsh / 无认证远程）→ 原直连展示地址。
+ * - 其余（老版 dsh 无认证）→ 原直连展示地址。
  * @param {boolean} isTab 是否标签页模式
  * @returns {Promise<{displayUrl: string} | {unauthorized: true}>}
  */
@@ -919,6 +958,10 @@ async function resolvePanelTarget(isTab) {
   await proxy.waitAuthed(8000);
   if (proxy.hasCookieForBase()) {
     displayUrl = isTab ? proxy.urlForTab() : proxy.baseUrl();
+    // 真远程（Remote-SSH / Dev Containers）：代理监听在远端回环随机端口，客户端
+    // webview 走不到，须再经一次 asExternalUri 端口转发；转发后 webview 请求的
+    // Host 就是转发 authority，代理会按该 authority 换发 Cookie 再注入上游。
+    displayUrl = await forwardToClient(displayUrl);
     // 端到端就绪确认：代理链路（注入 Cookie → 上游 → 回包）拿到 200 才交给
     // iframe，避免 dsh 半就绪（端口已监听但插件/连接未加载完）导致首次加载失败。
     const deadline = Date.now() + 6000;
@@ -4007,6 +4050,9 @@ function activate(context) {
         url = u.toString();
       } catch { /* 保持裸地址 */ }
     }
+    // 真远程：上面两种地址都是扩展宿主（= dsh 所在机器）的回环地址，客户端浏览器
+    // 直接打开只会落到本机自己的 3080（或打不开），须先经端口转发。
+    url = await forwardToClient(url);
     vscode.env.openExternal(vscode.Uri.parse(url));
   });
 
@@ -4182,5 +4228,8 @@ module.exports.__internals = {
   runCommandOk,
   runCommandOutput,
   isLocalLoopbackTarget,
+  needsClientForwarding,
+  forwardToClient,
+  resolvePanelTarget,
   probeDirectIndexStatus
 };

@@ -2,6 +2,16 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。完整提交历史见 [GitHub](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/commits/main)。
 
+## 未发布
+
+**忠实窗口（面板）**
+
+- **修复：Remote-SSH / Dev Containers 下面板必然「dsh web 需要浏览器认证，且当前实例无法静默认证」**——`isLocalLoopbackTarget()` 不再按 `remoteName` 一刀切禁用受管认证代理：`extensionKind: ["workspace"]` 下扩展宿主与 dsh 同机，回环前提与本地等价。真远程新增一步端口转发（`forwardToClient()`），把代理监听的远端回环随机端口经 `vscode.env.asExternalUri` 暴露给 webview，面板与 Copilot 桥接恢复无感认证；「在浏览器中打开」也不再打开客户端本机的 3080，而是打开转发后的地址。「重启并自动认证」「粘贴认证链接」在真远程从此真正可用。仅 `dshPanel.url` 指向非回环地址时保持不启用代理。
+
+**测试**
+
+- `test/remote-mode.test.js` 重写为真远程回归：本地 / WSL / Remote-SSH / Dev Containers 的启用矩阵、`needsClientForwarding()` 判定，并用真实 TCP 转发模拟 VS Code 端口转发，端到端验证「客户端 authority → 远端代理 → dsh」链路拿到 200、上游 Host 与围栏一致（24 项断言）。
+
 ## 1.0.0 —— 第一个正式版本
 
 **Copilot 桥接**
