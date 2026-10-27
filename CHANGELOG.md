@@ -2,6 +2,25 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。完整提交历史见 [GitHub](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/commits/main)。
 
+## 1.0.2 —— 支持 Remote-SSH / Dev Containers（Issue #24）
+
+**忠实窗口（面板）**
+
+- **修复：Remote-SSH / Dev Containers 下 dsh 已经启动、面板却稳定 401「无法连接 DeepSeek Harness」**。根因是 `isLocalLoopbackTarget()` 在 `remoteName` 非 `wsl` 时一律返回 false，受管认证代理被整体禁用——但扩展声明 `extensionKind: ["workspace"]`，真远程下扩展宿主与 dsh 本来就同机，代理前提完全成立。
+- 现在改为按「`dshPanel.url` 是否回环」判定代理可用性，真远程下：
+  - 代理仍在服务器回环随机端口监听，面板地址经 `vscode.env.asExternalUri` 转发到客户端后再加载；
+  - Copilot 桥接（扩展自身 `/api`）留在服务器侧直连代理，不再 401；
+  - 「在浏览器中打开」同样经转发，不再打开客户端本机的 `127.0.0.1:3080`（而是服务器上的 DSH）；`asExternalUri` 失败时面板给出可读错误页，不再白屏。
+- **安全加固（远程模式）**：代理不再无条件接受匿名请求——远程模式下只放行「Host 等于扩展已转发给客户端的 authority」的请求，其余一律 403；扩展自身的请求带一次性随机密钥头 `x-dsh-proxy-key`。新增 `dshPanel.remoteAuthProxy`（默认 `true`），多用户共享服务器可关闭，回到「浏览器认证引导」旧行为；非回环目标仍然不启用代理。
+- 已知边界：Codespaces / Remote Tunnels 这类转发到公网 HTTPS 域名的场景不在覆盖范围（dsh 的 `/api` 围栏只接受回环 authority）；真远程下标签页与侧边栏的 origin 隔离可能退化为同源（单活动视图策略仍生效）。
+
+**测试**
+
+- 新增 `remote-auth-proxy` 测试套（28 项）：用真实 TCP 转发器模拟 VS Code 端口转发，覆盖客户端 authority 的 Cookie 换发、远程 403 拦截、扩展侧 `/api` 密钥头、浏览器打开地址转发、面板 CSP 与 `asExternalUri` 失败报错。
+- 重写 `remote-mode` 测试套（34 项）：URL-only 回环判定、`needsPortForwarding` 分类、远程代理开关与实例重建、转发失败时的可读错误。
+- WSL2 真机端到端（Linux 服务器 + Windows 客户端 + 真实 dsh 0.2.1-rc.2）：经转发的客户端地址返回 200（37 KB GUI HTML）、经转发的 `/api` 返回 200、直连代理端口 403、带密钥 200。
+- 全套 14 个测试套件通过（366 项断言 + 真实 dsh e2e）。
+
 ## 1.0.1 —— 支持官网 Windows 桌面版
 
 **忠实窗口（面板）**

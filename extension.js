@@ -28,7 +28,7 @@ let gContext = null;
 let dshModelProviderRegistered = false;
 // dsh 0.1.2-rc 起新增 web 浏览器认证：进程启动令牌（每次重启变化，从 stdout 学习）。
 let dshLaunchToken = null;
-// 本地受管认证代理（null = 未创建或不可用：Remote 场景 / 目标非回环地址）。
+// 受管认证代理（null = 未创建或不可用：目标非回环地址、或远程场景被配置关闭）。
 let authProxy = null;
 // ensureAuthProxy 的并发去重：多个视图/API 同时触发时只创建一次。
 let authProxyPromise = null;
@@ -384,23 +384,6 @@ async function ensureDshInstalled() {
 }
 
 /**
- * 将服务地址转换为 webview 可访问的显示地址。
- * 本地场景返回原地址；Remote/vscode-server 场景通过 asExternalUri
- * 自动建立端口转发（可能是带本地转发端口的地址，也可能是 HTTPS 转发域名），
- * 把远程 3080 暴露到本地供 iframe 加载。
- * @returns {Promise<string>}
- */
-async function resolveDisplayUrl() {
-  const url = getUrl();
-  try {
-    const external = await vscode.env.asExternalUri(vscode.Uri.parse(url));
-    return external.toString();
-  } catch {
-    return url;
-  }
-}
-
-/**
  * 工作区目录：优先 VS Code 打开的第一个工作区文件夹，否则退回用户主目录。
  * 这就是 dsh 启动时的工作区（cwd）。
  * @returns {string}
@@ -456,6 +439,9 @@ function httpPostJson(url, payload, timeoutMs = 5000) {
     }
     const lib = target.protocol === 'https:' ? https : http;
     const data = JSON.stringify(payload);
+    // 远程模式下代理会拒绝无密钥请求：扩展自身的 /api 调用统一带上当前代理密钥
+    // （直连 dsh 时多一个自定义头，dsh 忽略，无副作用）。
+    const proxyAuth = (remoteAuthProxyKey() || {});
     const req = lib.request({
       hostname: target.hostname,
       port: target.port || (target.protocol === 'https:' ? 443 : 80),
@@ -463,7 +449,8 @@ function httpPostJson(url, payload, timeoutMs = 5000) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(data)
+        'Content-Length': Buffer.byteLength(data),
+        ...proxyAuth
       }
     }, (res) => {
       let body = '';
@@ -566,17 +553,61 @@ async function registerWorkspace() {
 
 const AUTH_PROXY_STATE_KEY = 'dsh.webAuth.tokenCache';
 
-/** 是否为本地（或 WSL Remote——宿主与 dsh 同机回环）且 dshPanel.url 指向回环地址的场景。 */
+/**
+ * dshPanel.url 是否指向回环地址（以扩展宿主视角）。
+ *
+ * 扩展声明 `extensionKind: ["workspace"]`，所以本地 / WSL Remote / Remote-SSH /
+ * Dev Containers 下扩展宿主都与 dsh 同机：只要 url 是回环地址，宿主就能直连，
+ * 受管认证代理也就能建起来（代理监听宿主回环）。区别只在「客户端 webview 能否
+ * 直接访问宿主的 127.0.0.1」——WSL 可以（VS Code 的 localhost 转发），真远程不行，
+ * 需要 asExternalUri 把代理端口转发一次（见 toClientUrl）。
+ * @returns {boolean}
+ */
 function isLocalLoopbackTarget() {
   try {
-    // WSL Remote 除外：扩展宿主与 dsh 同在 WSL 内（同机回环），代理前提与本地等价；
-    // 镜像网络 / VS Code 端口转发下 Windows 侧 webview 可达 WSL 的 127.0.0.1。
-    if (vscode.env && vscode.env.remoteName && vscode.env.remoteName !== 'wsl') return false;
     const u = new URL(getUrl());
     return ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(u.hostname);
   } catch {
     return false;
   }
+}
+
+/**
+ * 是否处于「真远程」窗口：Remote-SSH / Dev Containers 等，客户端 webview 访问不到
+ * 宿主的 127.0.0.1，必须经 asExternalUri 把端口转发到客户端。
+ * WSL Remote 例外：VS Code 的 localhost 转发让 Windows 侧直达 WSL 回环，无需转发。
+ * @returns {boolean}
+ */
+function needsPortForwarding() {
+  return !!(vscode.env && vscode.env.remoteName && vscode.env.remoteName !== 'wsl');
+}
+
+/**
+ * 把「扩展宿主可达的地址」转换成「客户端 webview/浏览器可达的地址」。
+ * 真远程经 vscode.env.asExternalUri 建立端口转发（返回客户端本机转发地址或隧道域名），
+ * 本地 / WSL 原样返回（行为不变）。
+ * @param {string} url
+ * @returns {Promise<{url: string, forwarded: boolean}>} forwarded=false 表示无需转发或转发失败
+ */
+async function toClientUrlInfo(url) {
+  if (!needsPortForwarding()) return { url, forwarded: false };
+  try {
+    const external = await vscode.env.asExternalUri(vscode.Uri.parse(url));
+    const out = external && typeof external.toString === 'function' ? external.toString() : '';
+    return { url: out || url, forwarded: !!out };
+  } catch (e) {
+    console.warn('[DeepSeek Harness] asExternalUri 端口转发失败，退回宿主地址：' + ((e && e.message) || e));
+    return { url, forwarded: false };
+  }
+}
+
+/**
+ * toClientUrlInfo 的简写：只要地址（转发失败时退回宿主地址）。
+ * @param {string} url
+ * @returns {Promise<string>}
+ */
+async function toClientUrl(url) {
+  return (await toClientUrlInfo(url)).url;
 }
 
 /** 与 dsh 服务端一致的 Host 归一化：new URL('http://' + host).host。 */
@@ -631,14 +662,31 @@ function learnDshToken(tokenOrUrl) {
 
 /**
  * 确保本地受管认证代理已启动（127.0.0.1 随机端口，仅本机可访问）。
- * Remote 场景或目标非回环地址时返回 null（维持原直连行为）。
+ * 目标非回环地址、或真远程场景被 dshPanel.remoteAuthProxy 关闭时返回 null（维持原直连行为）。
  * @returns {Promise<object|null>}
  */
+/** 当前场景是否应启用受管认证代理：回环目标；真远程还需用户未关闭 remoteAuthProxy。 */
+function authProxyWanted() {
+  if (!isLocalLoopbackTarget()) return false;
+  if (needsPortForwarding() && !cfg().get('dshPanel.remoteAuthProxy', true)) return false;
+  return true;
+}
+
 async function ensureAuthProxy() {
-  if (!isLocalLoopbackTarget()) return null;
+  if (!authProxyWanted()) {
+    // 配置把代理关掉（或目标改成非回环）时，及时释放旧代理，避免残留监听。
+    if (authProxy) {
+      const old = authProxy;
+      authProxy = null;
+      authProxyPromise = null;
+      await old.close().catch(() => {});
+    }
+    return null;
+  }
+  const remote = needsPortForwarding();
   if (authProxy) {
-    if (authProxy.target() !== getUrl()) {
-      // 目标被改配置：旧 Cookie/令牌对新实例无效，整组重建。
+    if (authProxy.target() !== getUrl() || authProxy.remoteMode() !== remote) {
+      // 目标/远程模式被改配置：旧 Cookie/令牌/来源白名单对新实例无效，整组重建。
       const old = authProxy;
       authProxy = null;
       authProxyPromise = null;
@@ -651,7 +699,7 @@ async function ensureAuthProxy() {
   authProxyPromise = (async () => {
     let proxy;
     try {
-      proxy = await createAuthProxy(getUrl());
+      proxy = await createAuthProxy(getUrl(), { remote });
     } catch (e) {
       console.error('[DeepSeek Harness] 认证代理启动失败，回退直连：', e);
       return null;
@@ -689,17 +737,41 @@ async function ensureAuthProxy() {
  * - 转发时注入 Host 与 Cookie；遇 401 且持有令牌时自动重换并重试一次；
  * - 响应剥离 Set-Cookie（Cookie 由代理持有，不进 webview 第三方上下文）；
  * - WebSocket 升级按原头转发并双向透传（注入 Host/Cookie）。
+ *
+ * 远程窗口（Remote-SSH / Dev Containers）下的额外约束：代理经 asExternalUri 把端口
+ * 转发给客户端后，服务器回环上就多了一个可被同机其他用户枚举到的端口。因此 remote
+ * 模式会对**无密钥请求**要求 Host 属于「扩展已经转发给客户端的 authority」白名单
+ * （acceptClientAuthority 登记），扩展自身的请求用 x-dsh-proxy-key 头放行；其他一律 403。
+ * 本地模式保持原行为（Host 即代理自身 authority），不做额外校验。
  * @param {string} targetUrl dsh web 服务地址
+ * @param {{remote?: boolean}} [options]
  * @returns {Promise<object>} 代理句柄
  */
-function createAuthProxy(targetUrl) {
+function createAuthProxy(targetUrl, options) {
   return new Promise((resolve, reject) => {
     const target = new URL(targetUrl);
     const targetPort = Number(target.port) || (target.protocol === 'https:' ? 443 : 80);
+    const remoteMode = !!(options && options.remote);
+    // 扩展自身访问代理的共享密钥（远程模式下无密钥只能靠客户端 authority 白名单）。
+    const proxyKey = crypto.randomBytes(24).toString('base64url');
+    const clientAuthorities = new Set(); // 已转发给客户端的 authority（远程模式白名单）
     const cookies = new Map(); // authority -> 'name=value'
     const exchanges = new Map(); // authority -> Promise（并发去重）
     let token = null;
     let port = 0;
+
+    /** 扩展自身请求带的密钥头（本地模式同样发送，代理侧本地不校验，无副作用）。 */
+    function keyHeaders() {
+      return { 'x-dsh-proxy-key': proxyKey };
+    }
+
+    /** 远程模式：无密钥请求只放行已登记给客户端的 authority。 */
+    function allowsRequest(req) {
+      if (!remoteMode) return true;
+      if (req.headers && req.headers['x-dsh-proxy-key'] === proxyKey) return true;
+      const authority = normAuthority(req.headers && req.headers.host);
+      return !!(authority && clientAuthorities.has(authority));
+    }
 
     /** 为指定 authority 换发 Cookie（GET /?token=，Host 指向代理自身 authority）。 */
     function exchangeFor(authority) {
@@ -775,6 +847,7 @@ function createAuthProxy(targetUrl) {
             host: '127.0.0.1',
             port,
             path: '/',
+            headers: keyHeaders(),
             agent: new http.Agent({ keepAlive: false })
           }, (res) => {
             res.resume();
@@ -859,6 +932,13 @@ function createAuthProxy(targetUrl) {
 
     /** WebSocket 升级透传（注入 Host/Cookie，原始字节双向转发）。 */
     function onUpgrade(req, socket, head) {
+      if (!allowsRequest(req)) {
+        try {
+          socket.write('HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+          socket.destroy();
+        } catch { /* noop */ }
+        return;
+      }
       const authority = normAuthority(req.headers.host) || `127.0.0.1:${port}`;
       const cookie = cookies.get(authority) || null;
       const headers = { ...req.headers };
@@ -916,6 +996,14 @@ function createAuthProxy(targetUrl) {
     }
 
     const server = http.createServer((req, res) => {
+      if (!allowsRequest(req)) {
+        // 远程模式：无密钥且 Host 不在客户端转发白名单（同机他人枚举到该端口的典型请求）。
+        try {
+          res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+          res.end('DeepSeek Harness 认证代理：拒绝未授权的来源');
+        } catch { /* noop */ }
+        return;
+      }
       forward(req, res).catch(() => { try { res.destroy(); } catch { /* noop */ } });
     });
     server.on('upgrade', onUpgrade);
@@ -927,6 +1015,7 @@ function createAuthProxy(targetUrl) {
       resolve({
         target: () => targetUrl,
         port: () => port,
+        remoteMode: () => remoteMode,
         baseUrl: () => `http://127.0.0.1:${port}`,
         urlForTab: () => {
           const u = new URL(`http://127.0.0.1:${port}`);
@@ -936,9 +1025,18 @@ function createAuthProxy(targetUrl) {
         hasCookieForBase: () => cookies.has(`127.0.0.1:${port}`),
         hasCookieForTab: () => cookies.has(`localhost:${port}`),
         token: () => token,
+        /** 扩展自身访问代理的密钥头（远程模式下无密钥请求会被 403）。 */
+        keyHeaders,
+        /** 登记一个已转发给客户端的 authority（远程模式白名单，来自 asExternalUri 结果）。 */
+        acceptClientAuthority: (authority) => {
+          const norm = normAuthority(authority);
+          if (norm) clientAuthorities.add(norm);
+        },
         status: () => ({
           target: targetUrl,
           proxy: `http://127.0.0.1:${port}`,
+          remoteMode,
+          clientAuthorities: [...clientAuthorities],
           tokenKnown: !!token,
           authedAuthorities: [...cookies.keys()]
         }),
@@ -982,14 +1080,6 @@ function createAuthProxy(targetUrl) {
   });
 }
 
-/**
- * 为面板解析最终展示地址：
- * - 代理可用且 Cookie 就绪 → 代理地址（webview 由此获得无感认证）；
- * - 代理可用但未认证且上游 401 → { unauthorized: true }（引导接管）；
- * - 其余（Remote / 非回环 / 老版 dsh 无认证）→ 原直连展示地址。
- * @param {boolean} isTab 是否标签页模式
- * @returns {Promise<{displayUrl: string} | {unauthorized: true}>}
- */
 /** 无代理时对 dsh 首页做直接状态探测（401 = 新版需要认证，用于让引导可达）。 */
 function probeDirectIndexStatus(timeoutMs = 4000) {
   return new Promise((done) => {
@@ -1021,36 +1111,54 @@ function probeDirectIndexStatus(timeoutMs = 4000) {
  * - 代理可用但未认证且上游 401 → { unauthorized: true }（引导接管）；
  * - 无代理（真远程/非回环）但直连探测到 401 → { unauthorized: true }（让中文引导
  *   与「在浏览器中打开（携带令牌）」可达，不再让用户面对英文 401 原文）；
- * - 其余（本地老版 dsh / 无认证远程）→ 原直连展示地址。
+ * - 其余（本地老版 dsh / 无认证远程）→ 原直连展示地址；
+ * - 真远程还需要把地址经 asExternalUri 转发给客户端：转发失败时返回
+ *   { forwardFailed: true, reason }，由调用方给出可读错误页而不是白屏。
  * @param {boolean} isTab 是否标签页模式
- * @returns {Promise<{displayUrl: string} | {unauthorized: true}>}
+ * @returns {Promise<{displayUrl: string} | {unauthorized: true} | {forwardFailed: true, reason: string}>}
  */
 async function resolvePanelTarget(isTab) {
-  let displayUrl = isTab ? getTabDisplayUrl(await resolveDisplayUrl()) : await resolveDisplayUrl();
   const proxy = await ensureAuthProxy();
-  if (!proxy) {
-    // 真远程/非回环：没有代理可注入 Cookie，但至少要给用户可见的中文引导。
-    const status = await probeDirectIndexStatus();
-    if (status === 401) return { unauthorized: true };
-    return { displayUrl };
-  }
-  await proxy.waitAuthed(8000);
-  if (proxy.hasCookieForBase()) {
-    displayUrl = isTab ? proxy.urlForTab() : proxy.baseUrl();
-    // 端到端就绪确认：代理链路（注入 Cookie → 上游 → 回包）拿到 200 才交给
-    // iframe，避免 dsh 半就绪（端口已监听但插件/连接未加载完）导致首次加载失败。
-    const deadline = Date.now() + 6000;
-    let probeStatus = 0;
-    while (Date.now() < deadline) {
-      probeStatus = await proxy.probeSelf(2500);
-      if (probeStatus === 200) break;
-      await sleep(400);
+  let displayUrl = null;
+  if (proxy) {
+    await proxy.waitAuthed(8000);
+    if (proxy.hasCookieForBase()) {
+      displayUrl = isTab ? proxy.urlForTab() : proxy.baseUrl();
+      // 端到端就绪确认：代理链路（注入 Cookie → 上游 → 回包）拿到 200 才交给
+      // iframe，避免 dsh 半就绪（端口已监听但插件/连接未加载完）导致首次加载失败。
+      const deadline = Date.now() + 6000;
+      while (Date.now() < deadline) {
+        if ((await proxy.probeSelf(2500)) === 200) break;
+        await sleep(400);
+      }
     }
-    return { displayUrl };
   }
-  const status = await proxy.probeIndexStatus();
-  if (status === 401) return { unauthorized: true };
-  return { displayUrl }; // 老版本 dsh（无认证），照旧直连
+  if (!displayUrl) {
+    displayUrl = isTab ? getTabDisplayUrl(getUrl()) : getUrl();
+    // 无代理（非回环 / 远程代理已关闭 / 创建失败）或代理未认证：探测直连状态，
+    // 401 时返回引导（老版本 dsh 无认证则照旧直连）。
+    const status = proxy ? await proxy.probeIndexStatus() : await probeDirectIndexStatus();
+    if (status === 401) return { unauthorized: true };
+  }
+  // 真远程（Remote-SSH / Dev Containers）：把「宿主可达」的地址经 asExternalUri
+  // 转发成「客户端可达」的地址，webview iframe 才能加载。
+  const info = await toClientUrlInfo(displayUrl);
+  if (needsPortForwarding() && !info.forwarded) {
+    // asExternalUri 失败（端口转发被禁用/被拒）：如果继续返回宿主地址，webview 只会
+    // 白屏或连接失败且没有可读原因——这里直接返回可读错误，便于用户自查。
+    return {
+      forwardFailed: true,
+      reason: '面板地址端口转发失败：无法把服务器回环地址经 VS Code 端口转发暴露给客户端' +
+        '（请确认 Remote 会话允许端口转发，或检查 remote.autoForwardPorts / 代理设置）。'
+    };
+  }
+  const clientUrl = info.url;
+  if (proxy && clientUrl !== displayUrl) {
+    // 登记转发后的 authority：远程模式下代理只放行来自该 authority 的匿名请求，
+    // 同机他人直接扫宿主回环端口会被 403。
+    try { proxy.acceptClientAuthority(new URL(clientUrl).host); } catch { /* noop */ }
+  }
+  return { displayUrl: clientUrl };
 }
 
 /**
@@ -1107,7 +1215,16 @@ function maybeGuideAuth(isTab) {
   });
 }
 
-/** 扩展自身访问 dsh /api 的基址：代理就绪时走代理（自动带认证）。 */
+/** 当前代理的密钥头；无代理时返回 null（供扩展自身的 /api 请求附加）。 */
+function remoteAuthProxyKey() {
+  return (authProxy && typeof authProxy.keyHeaders === 'function') ? authProxy.keyHeaders() : null;
+}
+
+/**
+ * 扩展自身访问 dsh /api 的基址：代理就绪时走代理（自动带认证）。
+ * 远程窗口下代理同样可用（Remote-SSH / Dev Containers 中扩展宿主与 dsh 同机），
+ * 只是 iframe 侧还要把代理端口经 asExternalUri 转发给客户端（见 resolvePanelTarget）。
+ */
 async function apiBase() {
   if (isLocalLoopbackTarget()) {
     const proxy = await ensureAuthProxy();
@@ -1120,6 +1237,27 @@ async function apiBase() {
     }
   }
   return getUrl().replace(/\/+$/, '');
+}
+
+/**
+ * 「在浏览器中打开」的目标地址：优先携带启动令牌的认证链接（真实浏览器顶层导航
+ * 可正常换取 Cookie）；真远程再经 asExternalUri 转发到客户端——否则在 Remote-SSH
+ * 下打开的是**客户端本机**的 127.0.0.1:3080，而不是服务器上的 DSH。
+ * @returns {Promise<string>}
+ */
+async function resolveBrowserUrl() {
+  let url = getUrl();
+  const proxy = await ensureAuthProxy();
+  if (proxy && proxy.token()) {
+    url = proxy.authenticatedUrl();
+  } else if (dshLaunchToken) {
+    try {
+      const u = new URL(url);
+      u.searchParams.set('token', dshLaunchToken);
+      url = u.toString();
+    } catch { /* 保持裸地址 */ }
+  }
+  return toClientUrl(url);
 }
 
 /**
@@ -2392,9 +2530,12 @@ async function preparePanelHtml(isTab) {
 
   // 服务就绪后，尽力把 VSCode 当前工作区注册进 DSH 工作区列表（不阻塞渲染）。
   registerWorkspace().catch(() => {});
-  // 解析最终展示地址：本地场景走受管认证代理（无感通过 dsh web 浏览器认证）；
-  // Remote / 非回环 / 老版 dsh（无认证）维持原直连显示地址（远程场景经端口转发）。
+  // 解析最终展示地址：回环目标走受管认证代理（无感通过 dsh web 浏览器认证）；
+  // 真远程（Remote-SSH / Dev Containers）再把地址经 asExternalUri 转发到客户端。
   const target = await resolvePanelTarget(isTab);
+  if (target.forwardFailed) {
+    return { ok: false, kind: 'unreachable', reason: target.reason };
+  }
   if (target.unauthorized) {
     maybeGuideAuth(isTab);
     const hasProxy = !!authProxy;
@@ -3989,16 +4130,17 @@ async function showChatStatus() {
 async function authStatusText() {
   const proxy = await ensureAuthProxy();
   if (!proxy) {
-    return '未启用受管认证代理（Remote 场景或目标非回环地址），面板走直连';
+    return '未启用受管认证代理（目标非回环地址，或远程场景已在设置中关闭），面板走直连';
   }
   const s = proxy.status();
+  const mode = s.remoteMode ? '远程模式' : '本地模式';
   if (proxy.hasCookieForBase()) {
-    return '已认证（受管代理 ' + s.proxy + '）';
+    return '已认证（' + mode + '受管代理 ' + s.proxy + '）';
   }
   if (!s.tokenKnown) {
     return '未认证（尚未捕获 dsh 启动令牌；若 dsh 正在运行且返回 401，请重启 dsh web 由扩展接管）';
   }
-  return '令牌已捕获，Cookie 换发中/失败（代理 ' + s.proxy + '）';
+  return '令牌已捕获，Cookie 换发中/失败（' + mode + '受管代理 ' + s.proxy + '）';
 }
 
 function activate(context) {
@@ -4115,21 +4257,7 @@ function activate(context) {
   });
 
   const openBrowserCmd = vscode.commands.registerCommand('dshPanel.openInBrowser', async () => {
-    // 新版 dsh web 有浏览器认证：优先打开携带启动令牌的认证链接（真实浏览器
-    // 顶层导航可正常换取 Cookie）；有代理则用代理合成的认证地址，无代理时
-    // 也尽量用 stdout 捕获到的令牌拼链接，让用户始终有手动认证出路。
-    let url = getUrl();
-    const proxy = await ensureAuthProxy();
-    if (proxy && proxy.token()) {
-      url = proxy.authenticatedUrl();
-    } else if (dshLaunchToken) {
-      try {
-        const u = new URL(url);
-        u.searchParams.set('token', dshLaunchToken);
-        url = u.toString();
-      } catch { /* 保持裸地址 */ }
-    }
-    vscode.env.openExternal(vscode.Uri.parse(url));
+    vscode.env.openExternal(vscode.Uri.parse(await resolveBrowserUrl()));
   });
 
   const restartCmd = vscode.commands.registerCommand('dshPanel.restart', async () => {
@@ -4293,6 +4421,7 @@ module.exports.__internals = {
   checkDshModelDrift,
   registerDshModelProvider,
   dshRpc,
+  httpPostJson,
   fetchSessionHistory,
   dshEventText,
   applyDshEvents,
@@ -4310,5 +4439,10 @@ module.exports.__internals = {
   runCommandOk,
   runCommandOutput,
   isLocalLoopbackTarget,
+  needsPortForwarding,
+  toClientUrl,
+  authProxyWanted,
+  resolvePanelTarget,
+  resolveBrowserUrl,
   probeDirectIndexStatus
 };

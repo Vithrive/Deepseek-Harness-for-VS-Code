@@ -80,6 +80,7 @@
 | `dshPanel.autoRegisterWorkspace` | `true` | 是否把当前工作区自动注册为 DSH 工作区 |
 | `dshPanel.autoInstallDsh` | `true` | 未安装 dsh 时是否提示并代为安装 |
 | `dshPanel.dshCommand` | `dsh` | dsh 命令（可填完整路径） |
+| `dshPanel.remoteAuthProxy` | `true` | Remote-SSH / Dev Containers 下是否启用受管认证代理（v1.0.2 起默认启用）。共享服务器请评估：代理只监听服务器回环，但同机他人枚举到该端口可能借它访问你的 DSH |
 | `dshPanel.killOnDispose` | `true` | 扩展停用时是否结束它启动的 dsh |
 | `dshPanel.openSystemBrowser` | `false` | 扩展启动 dsh 时是否保留弹系统浏览器的旧行为 |
 | `dshPanel.installClipboardPlugin` | `true` | 自动安装内置 `dsh-webview-clipboard` 插件（修复 macOS 面板内编辑快捷键；Windows/Linux 上为惰性文件不影响行为）。怀疑影响 dsh web 启动时可关闭对比 |
@@ -119,8 +120,8 @@ dsh `0.1.2-rc` 起为 Web GUI 启用了浏览器认证：每次 `dsh web` 启动
 - 令牌会缓存到 VS Code 全局状态：其他窗口 / 重载 VS Code 后，只要 dsh 实例没变，依然静默认证；
 - 启动 dsh 时默认附加 `--no-open`，不再弹出系统浏览器（需要旧行为时打开 `dshPanel.openSystemBrowser`）；
 - 如果 dsh 是**在本扩展之外启动**的（拿不到它的令牌），首次打开面板会提示一次，二选一：「重启并自动认证（推荐）」由扩展接管 dsh，此后恢复完全静默；或把终端里 `dsh web:` 打印的认证链接整行粘贴进来；
-- 「在浏览器中打开」按钮会自动携带当前令牌，系统浏览器可正常换取自己的 Cookie；
-- Remote / 非回环地址场景不启用代理（认证须在 dsh 所在机器的浏览器完成一次），行为与旧版一致。
+- 「在浏览器中打开」按钮会自动携带当前令牌，系统浏览器可正常换取自己的 Cookie；Remote-SSH / Dev Containers 下该地址同样经端口转发后再打开（否则打开的是**客户端本机**的 127.0.0.1，而不是服务器上的 DSH）；
+- 真远程（Remote-SSH / Dev Containers）场景同样启用代理（v1.0.2 起）：代理只监听服务器回环，再经 `vscode.env.asExternalUri` 把端口转发到客户端供面板加载；扩展自身的 `/api` 调用留在服务器侧直连代理。共享服务器上的安全说明见下文「远程服务器场景」；
 
 ### 对旧版本 dsh 的兼容（无认证版本）
 
@@ -136,8 +137,15 @@ dsh `0.1.2-rc` 起为 Web GUI 启用了浏览器认证：每次 `dsh web` 启动
 扩展声明 `extensionKind: ["workspace"]`，在 Remote-SSH / Dev Containers 等场景下运行于服务器端：
 
 1. 自动检测并安装服务器端的 dsh（`npm install -g @deepseek-ai/dsh`，要求服务器已装 Node.js 与 npm）；
-2. 自动端口转发：通过 `vscode.env.asExternalUri` 把远程 `127.0.0.1:3080` 暴露到本地，iframe 直接加载，无需手动配 SSH 隧道（首次转发确认允许即可）；
+2. **受管认证代理照常工作（v1.0.2 起，Issue #24）**：扩展宿主与 dsh 同机，代理在服务器回环随机端口监听；面板地址再经 `vscode.env.asExternalUri` 转发到客户端（首次转发确认允许即可），面板与 Copilot 桥接都不再停在 401；
 3. dsh 以远程工作区为 cwd 启动并自动注册。
+
+**安全说明（重要）**：代理本身不做身份认证——本地场景一直如此。真远程下它意味着服务器回环上多了一个可被同机其他用户枚举到的端口，因此 v1.0.2 加了两道限制：
+
+- 远程模式下代理只放行 **Host 等于扩展已转发给客户端的 authority** 的匿名请求，其余（无密钥 + 其它 Host）一律 403；扩展自身的请求带一次性随机密钥头；
+- 提供 `dshPanel.remoteAuthProxy`（默认 `true`）开关；多用户共享服务器建议设为 `false`，此时面板回到「提示完成浏览器认证」的旧引导。
+
+仍未覆盖：Codespaces / Remote Tunnels 这类把端口转发到公网 HTTPS 域名的场景——dsh 的 `/api` 信任围栏只接受回环（或显式 `--trusted-host`）authority，面板可能逐 401；这类场景请使用 `ssh -L` 隧道或保持 `remoteAuthProxy=false`。
 
 如果 DSH 跑在另一台机器、且不是通过 VS Code Remote 连接的，可手动建隧道：`ssh -L 3080:127.0.0.1:3080 user@server`，并把 `dshPanel.autoStart` 设为 `false`。
 
@@ -242,7 +250,7 @@ DSH：用自己的一套 harness（记忆 / 技能 / AGENTS.md / 工具 / agent 
 
 ## 🌱 版本状态声明
 
-**1.0.0 起为正式版本；1.0.1 增加官网 Windows 桌面版支持**：忠实窗口（面板）与 Copilot 桥接两条能力线都已长期自用 + 回归测试覆盖，功能完整可用：
+**1.0.0 起为正式版本；1.0.1 增加官网 Windows 桌面版支持；1.0.2 支持 Remote-SSH / Dev Containers**：忠实窗口（面板）与 Copilot 桥接两条能力线都已长期自用 + 回归测试覆盖，功能完整可用：
 
 - 两条能力线：**忠实窗口**（把 DSH Web GUI 原样内嵌到侧边栏 / 编辑器标签页）与 **Copilot 桥接**（把 DSH 注册为 VS Code 聊天模型）——桥接仍在持续跟进 DeepSeek 模型与 dsh 版本演进，遇到不一致会在扩展内明确告警而不是静默降级；
 - 欢迎大家在不同操作系统（Windows / macOS / Linux，以及 Remote-SSH、WSL、Dev Containers 等远程场景）中测试使用；
@@ -270,4 +278,4 @@ code --install-extension deepseek-harness-vscode-<版本>.vsix
 ## 前置条件与已知限制
 
 - **前置条件**：已安装 DeepSeek Harness，以下三种方式扩展都会自动识别，也可用 `dshPanel.dshCommand` 指定完整路径：① `npm install -g @deepseek-ai/dsh` 全局安装；② `npx @deepseek-ai/dsh`；③ **官网 Windows 桌面版**（v1.0.1 起自动探测其内置 CLI，无需 npm/Node）。DSH 默认响应头未设置 `X-Frame-Options` / 严格 CSP，可被 iframe 正常内嵌。
-- **已知限制**：DSH 前端在 VS Code webview 多实例下退化为单例（普通浏览器多开正常，属 DSH 前端实现层面问题），因此标签页与侧边栏暂不能同时加载 DSH；扩展以「单活动视图」策略规避（打开标签页时侧边栏自动让位显示占位，关闭后自动恢复）。
+- **已知限制**：DSH 前端在 VS Code webview 多实例下退化为单例（普通浏览器多开正常，属 DSH 前端实现层面问题），因此标签页与侧边栏暂不能同时加载 DSH；扩展以「单活动视图」策略规避（打开标签页时侧边栏自动让位显示占位，关闭后自动恢复）。Remote-SSH / Dev Containers 下标签页与侧边栏的转发地址可能落到同一客户端端口（origin 相同），该隔离技巧会退化，但「单活动视图」仍然生效。

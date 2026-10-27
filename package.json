@@ -2,7 +2,7 @@
   "name": "deepseek-harness-vscode",
   "displayName": "DeepSeek Harness for VSCode",
   "description": "DeepSeek Harness (DSH) 的 VS Code 接入：侧边栏/标签页忠实呈现 DSH Web GUI 并自动检测启动，不影响用户对 DSH 本身的页面组织、第三方插件装配等二次开发行为；v0.7.13 起把 DSH 注册为 Copilot 聊天模型——模型选择器里出现 DeepSeek Harness 下属模型条目，接收 Copilot 组织好的现成对话、滤除对话内容无关的 prompt、交给 DSH 二次组织、流式回写，旨在利用 DSH 强大的任务编排与工具调用能力，发挥最大性能；v1.0.1 起自动识别官网 Windows 桌面版，用其内置 dsh CLI 启动（无需 npm/Node）",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "publisher": "vithrive",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -95,6 +95,11 @@
           "type": "string",
           "default": "dsh",
           "description": "dsh 命令（默认从 PATH 解析；未找到时自动尝试官网 Windows 桌面版内置 CLI 与 npx。如需强制指定完整路径，例如 C:\\Users\\you\\AppData\\Roaming\\npm\\dsh.cmd 或 <桌面版安装目录>\\resources\\runtime\\cli\\bin\\dsh.cmd）"
+        },
+        "dshPanel.remoteAuthProxy": {
+          "type": "boolean",
+          "default": true,
+          "description": "Remote-SSH / Dev Containers 等真远程窗口下是否启用受管认证代理（默认启用）：扩展在服务器回环起代理并经端口转发交给 webview，使面板与 Copilot 桥接免登录。代理只监听服务器回环，但同机的其他用户若枚举到该端口，可借它访问你的 DSH（绕过启动令牌）。多用户共享服务器建议关闭，此时面板会给出浏览器认证引导"
         },
         "dshPanel.killOnDispose": {
           "type": "boolean",
