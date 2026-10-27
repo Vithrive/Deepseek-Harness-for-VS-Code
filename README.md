@@ -30,7 +30,17 @@
 
   或在 VS Code 中：`Ctrl+Shift+P` → `Extensions: Install from VSIX...`。
 
-安装后 `Ctrl+Shift+P` → `Reload Window`。打开面板时扩展会自动检测并启动 DSH（未安装会提示并代为执行 `npm install -g @deepseek-ai/dsh`）。
+安装后 `Ctrl+Shift+P` → `Reload Window`。打开面板时扩展会自动检测并启动 DSH（未安装会提示并代为执行 `npm install -g @deepseek-ai/dsh`）；如果装的是**官网 Windows 桌面版**，扩展会直接用它自带的内置 CLI 启动，**不需要 npm / Node**（见下节）。
+
+### 官网 Windows 桌面版（v1.0.1 起自动支持）
+
+从 [官网](https://deepseek.com) 下载安装的 **DeepSeek Harness Windows 桌面版**是 Electron 应用，DSH 运行时内嵌在 `app.asar` 里、`dsh` 也不在 PATH 上，所以早期版本会把它误判成「未安装」。v1.0.1 起扩展会自动识别：
+
+- **安装位置**：优先读注册表卸载项的 `InstallLocation`（`HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall`，兼容机器级安装），再兜底常见的 `%LOCALAPPDATA%\Programs\DeepSeek Harness` 等目录；
+- **启动方式**：用桌面版自带的内置 CLI `<安装目录>\resources\runtime\cli\bin\dsh.cmd` 起一个 `dsh web` 实例（默认端口仍是 `dshPanel.port` = 3080），走的仍是 **web profile**——扩展的配套插件（`dsh-drop-caret` / `dsh-webview-clipboard` / `dsh-vscode-file-links`）照常安装并生效；
+- **认证**：桌面版 CLI 打印的启动链接里同样带令牌，扩展受管认证代理照旧无感完成浏览器认证；
+- **与桌面 App 的关系**：桌面 App 自己的后端固定为 `127.0.0.1:19387` + `desktop` profile，且带浏览器认证（令牌只经 Electron IPC 下发，外部无法复用），因此面板**不接管**桌面 App 正在运行的那个实例，而是用同一个 `~/.dsh` 起一个独立的 web 实例：**会话与凭据共享，插件/界面设置各自独立**——同一个会话在 App 与 VS Code 面板里都能看到；
+- **检测顺序**：`dshPanel.dshCommand`（或 PATH 上的 `dsh`）→ 桌面版内置 CLI → `npx` 缓存；也可把 `dshPanel.dshCommand` 直接填成内置 CLI 的完整路径来强制指定。
 
 ---
 
@@ -232,7 +242,7 @@ DSH：用自己的一套 harness（记忆 / 技能 / AGENTS.md / 工具 / agent 
 
 ## 🌱 版本状态声明
 
-**1.0.0 是第一个正式版本**：忠实窗口（面板）与 Copilot 桥接两条能力线都已长期自用 + 回归测试覆盖，功能完整可用：
+**1.0.0 起为正式版本；1.0.1 增加官网 Windows 桌面版支持**：忠实窗口（面板）与 Copilot 桥接两条能力线都已长期自用 + 回归测试覆盖，功能完整可用：
 
 - 两条能力线：**忠实窗口**（把 DSH Web GUI 原样内嵌到侧边栏 / 编辑器标签页）与 **Copilot 桥接**（把 DSH 注册为 VS Code 聊天模型）——桥接仍在持续跟进 DeepSeek 模型与 dsh 版本演进，遇到不一致会在扩展内明确告警而不是静默降级；
 - 欢迎大家在不同操作系统（Windows / macOS / Linux，以及 Remote-SSH、WSL、Dev Containers 等远程场景）中测试使用；
@@ -259,5 +269,5 @@ code --install-extension deepseek-harness-vscode-<版本>.vsix
 
 ## 前置条件与已知限制
 
-- **前置条件**：已安装 DeepSeek Harness（`npm install -g @deepseek-ai/dsh` 全局安装或 `npx @deepseek-ai/dsh` 均可，扩展自动识别两种方式，也可用 `dshPanel.dshCommand` 指定完整路径）；DSH 默认响应头未设置 `X-Frame-Options` / 严格 CSP，可被 iframe 正常内嵌。
+- **前置条件**：已安装 DeepSeek Harness，以下三种方式扩展都会自动识别，也可用 `dshPanel.dshCommand` 指定完整路径：① `npm install -g @deepseek-ai/dsh` 全局安装；② `npx @deepseek-ai/dsh`；③ **官网 Windows 桌面版**（v1.0.1 起自动探测其内置 CLI，无需 npm/Node）。DSH 默认响应头未设置 `X-Frame-Options` / 严格 CSP，可被 iframe 正常内嵌。
 - **已知限制**：DSH 前端在 VS Code webview 多实例下退化为单例（普通浏览器多开正常，属 DSH 前端实现层面问题），因此标签页与侧边栏暂不能同时加载 DSH；扩展以「单活动视图」策略规避（打开标签页时侧边栏自动让位显示占位，关闭后自动恢复）。

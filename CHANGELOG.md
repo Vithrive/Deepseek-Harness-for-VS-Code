@@ -2,6 +2,20 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。完整提交历史见 [GitHub](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/commits/main)。
 
+## 1.0.1 —— 支持官网 Windows 桌面版
+
+**忠实窗口（面板）**
+
+- **修复：只装了官网 Windows 桌面版（Electron 应用）的用户，面板打不开**。桌面版的 DSH 运行时内嵌在 `app.asar` 里、`dsh` 不在 PATH、用户通常也没有 npm，旧逻辑会把它误判成「未安装」，随后 `npm install -g @deepseek-ai/dsh` 也必然失败。
+  现在扩展把桌面版内置 CLI 作为**第三种启动来源**：从注册表卸载项的 `InstallLocation`（兼容 HKCU/HKLM）定位安装目录，兜底常见默认目录，然后调用 `<安装目录>\resources\runtime\cli\bin\dsh.cmd` 启动 `dsh web`——不需要 PATH / npm / Node。启动方式优先级：`dshPanel.dshCommand`（PATH 上的 `dsh`）→ 桌面版内置 CLI → `npx`。
+- 桌面版 CLI 起的实例仍是 **web profile**（默认端口 3080），扩展的配套插件、受管认证代理、Copilot 桥接全部照旧生效；与桌面 App 自己的 `127.0.0.1:19387` + `desktop` profile 实例并存，**会话与凭据共享**（同一个 `~/.dsh`）。
+- 含空格的 CLI 路径统一走 cmd.exe 引号处理（`shellCommandText`），`startDsh` 与 `dsh plugin add` 共用同一规则；插件安装改用已解析的启动方式，不再写死 `dsh.cmd`。
+- 「未安装」错误页与安装失败提示补充桌面版路径说明。
+
+**测试**
+
+- 新增 `desktop-app-support` 测试套（37 项断言）：安装目录定位、注册表输出解析、启动方式优先级、含空格路径引号、源码级接线；另有真实桌面版实例的端到端验证（启动 5.2s、无令牌 401、经代理首页 200、`session/list` 返回 323 个会话）。
+
 ## 1.0.0 —— 第一个正式版本
 
 **Copilot 桥接**

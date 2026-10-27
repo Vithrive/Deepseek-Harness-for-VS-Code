@@ -16,8 +16,8 @@ let activeView = null;
 let managedChild = null;
 // 防止多个视图实例同时触发启动。
 let ensurePromise = null;
-// 解析出的 dsh 启动方式：{ cmd, prefix }。null 表示尚未解析或都不可用。
-// 优先全局安装（dsh 命令），其次 npx 缓存安装（npx 安装不会写入全局 PATH）。
+// 解析出的 dsh 启动方式：{ cmd, prefix, kind }。null 表示尚未解析或都不可用。
+// 优先级：PATH 上的 dsh（npm 全局安装）→ 官网 Windows 桌面版内置 CLI → npx 缓存安装。
 let dshInvocation = null;
 let dshInvocationAt = 0;
 // 编辑器标签页模式：当前打开的 DSH 标签页 panel（未打开时为 null）。
@@ -84,9 +84,24 @@ function sanitizeCommand(cmd) {
 }
 
 function getDshCommand() {
-  // 配置了非法命令（含元字符）时回退 'dsh'，后续探测失败会自然落到 npx 兜底。
+  // 配置了非法命令（含元字符）时回退 'dsh'，后续探测失败会自然落到桌面版/npx 兜底。
   return sanitizeCommand(cfg().get('dshPanel.dshCommand', 'dsh')) || 'dsh';
 }
+
+// ── 官网 Windows 桌面版（Electron 应用）支持 ──
+// 桌面版把完整 dsh runtime 内嵌在 app.asar 里，并附带可直接调用的 CLI：
+//   <安装目录>\resources\runtime\cli\bin\dsh.cmd
+// 它用应用自带的 Electron 以 Node 模式跑 dsh CLI（`dsh web` 仍是 web profile），
+// 所以不需要 PATH 上的 dsh，也不需要 npm / Node。桌面版自己的后端固定在
+// 127.0.0.1:19387 + desktop profile，且带浏览器认证（令牌只经 Electron IPC 下发），
+// 外部无法复用；因此这里走「用桌面版自带 CLI 起一个 web profile 实例」。
+const DESKTOP_UNINSTALL_KEY = 'Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall';
+const DESKTOP_CLI_REL = path.join('resources', 'runtime', 'cli', 'bin', 'dsh.cmd');
+// 桌面版 CLI 探测结果缓存：值为 {cmd, installDir} 或 null；正负结果都缓存 5 分钟，
+// 避免面板每次刷新都去查注册表（用户装完桌面版后最多 5 分钟生效，重载窗口可立即重查）。
+let desktopDshCache;
+let desktopDshCacheAt = 0;
+const DESKTOP_DSH_CACHE_MS = 5 * 60 * 1000;
 
 /**
  * 执行一条命令并判断是否成功（exit code === 0）。
@@ -96,6 +111,18 @@ function getDshCommand() {
  * @param {number} timeoutMs
  * @returns {Promise<boolean>}
  */
+/**
+ * Windows 下经 cmd.exe 启动时的命令文本：含空格的单文件命令需整体加引号。
+ * 官网桌面版的 CLI 路径形如
+ *   C:\Users\<user>\AppData\Local\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd
+ * 含空格，不加引号会被 cmd.exe 按空格切碎。
+ * @param {string} cmd
+ * @returns {string}
+ */
+function shellCommandText(cmd) {
+  return (process.platform === 'win32' && /\s/.test(cmd) && fs.existsSync(cmd)) ? '"' + cmd + '"' : cmd;
+}
+
 function runCommandOk(cmd, args, timeoutMs = 15000) {
   return new Promise((resolve) => {
     // 纵深校验（PR #12 思路）：cmd 来自 getDshCommand()（已净化），此处再拒一次。
@@ -107,7 +134,7 @@ function runCommandOk(cmd, args, timeoutMs = 15000) {
     // POSIX 上 shell:false 参数按数组直达进程（无解释器、无注入面）；
     // Windows 上 shell:true 为命中 dsh.cmd shim 所必需（Node ≥18.20 无 shell 执行
     // .cmd 会抛 EINVAL，CVE-2024-27980 防护），注入面由上方的净化+白名单收敛。
-    const cmdText = (process.platform === 'win32' && /\s/.test(cmd) && fs.existsSync(cmd)) ? '"' + cmd + '"' : cmd;
+    const cmdText = shellCommandText(cmd);
     const child = spawn(cmdText, args, {
       shell: process.platform === 'win32',
       stdio: 'ignore',
@@ -146,7 +173,7 @@ function runCommandOutput(cmd, args, timeoutMs = 12000) {
     if (process.platform === 'win32') {
       // Windows：dsh 为 .cmd shim，必须经 cmd.exe（无 shell 会 EINVAL/ENOENT，
       // 见 CVE-2024-27980 防护）；cmd/参数均已净化，含空格文件路径加引号。
-      const quoted = (/\s/.test(cmd) && fs.existsSync(cmd)) ? `"${cmd}"` : cmd;
+      const quoted = shellCommandText(cmd);
       exec(`${quoted} ${args.join(' ')}`, {
         timeout: timeoutMs,
         windowsHide: true,
@@ -171,21 +198,108 @@ function runCommandOutput(cmd, args, timeoutMs = 12000) {
 }
 
 /**
- * 解析可用的 dsh 启动方式，返回 { cmd, prefix } 或 null。
- * 1) 优先配置的 dsh 命令（默认 'dsh'，即 npm 全局安装、已写入 PATH）；
- * 2) 回退到 npx 缓存安装（npx 安装只缓存到 npx 目录，不写全局 PATH，
+ * 解析 `reg query … /f "DeepSeek Harness" /d` 输出里的 InstallLocation 行。
+ * 注册表写法形如 `    InstallLocation    REG_SZ    D:\Apps\DeepSeek Harness`。
+ * @param {string} stdout
+ * @returns {string[]}
+ */
+function parseRegInstallLocations(stdout) {
+  const dirs = [];
+  for (const line of String(stdout || '').split(/\r?\n/)) {
+    const m = /^\s*InstallLocation\s+REG_(?:SZ|EXPAND_SZ)\s+(.+?)\s*$/i.exec(line);
+    if (m) dirs.push(m[1]);
+  }
+  return dirs;
+}
+
+/**
+ * 从候选安装目录里挑出第一个带桌面版内置 CLI 的（纯函数，便于测试）。
+ * @param {string[]} dirs 候选安装目录
+ * @param {(p: string) => boolean} [exists] 存在性判断（测试注入）
+ * @returns {{cmd: string, installDir: string} | null}
+ */
+function pickDesktopCli(dirs, exists = fs.existsSync) {
+  const seen = new Set();
+  for (const dir of dirs || []) {
+    if (typeof dir !== 'string' || dir.trim() === '') continue;
+    const key = dir.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const cli = path.join(dir, DESKTOP_CLI_REL);
+    if (exists(cli)) return { cmd: cli, installDir: dir };
+  }
+  return null;
+}
+
+/**
+ * 探测官网 Windows 桌面版的内置 CLI。
+ * 安装位置来源：1) 注册表卸载项的 InstallLocation（覆盖自定义安装盘/目录，
+ * 桌面版按用户安装写 HKCU，同时兼容 HKLM 的机器级安装）；2) 常见默认目录兜底。
+ * @returns {Promise<{cmd: string, installDir: string} | null>}
+ */
+async function probeDesktopDshCli() {
+  if (process.platform !== 'win32') return null;
+  const dirs = [];
+  // 1) 注册表。/f … /d 按「数据」搜，卸载项 DisplayName 为 "DeepSeek Harness <版本>"。
+  const keys = [
+    'HKCU\\' + DESKTOP_UNINSTALL_KEY,
+    'HKLM\\' + DESKTOP_UNINSTALL_KEY,
+    'HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall'
+  ];
+  for (const key of keys) {
+    try {
+      const out = await runCommandOutput('reg', ['query', key, '/s', '/f', '"DeepSeek Harness"', '/d'], 8000);
+      dirs.push(...parseRegInstallLocations(out));
+    } catch (_) { /* 该 hive 无匹配项或无权限：继续 */ }
+  }
+  // 2) 默认安装目录兜底（注册表被清理、安装器路径变体等）。
+  const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+  dirs.push(path.join(localAppData, 'Programs', 'DeepSeek Harness'));
+  dirs.push(path.join(process.env.ProgramFiles || 'C:\\Program Files', 'DeepSeek Harness'));
+  dirs.push(path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'DeepSeek Harness'));
+  return pickDesktopCli(dirs);
+}
+
+/** 定位桌面版内置 CLI（带缓存，避免面板每次刷新都查注册表）。 */
+async function findDesktopDshCli() {
+  if (desktopDshCache !== undefined && (Date.now() - desktopDshCacheAt) < DESKTOP_DSH_CACHE_MS) {
+    return desktopDshCache;
+  }
+  const found = await probeDesktopDshCli();
+  desktopDshCache = found;
+  desktopDshCacheAt = Date.now();
+  return found;
+}
+
+/**
+ * 解析可用的 dsh 启动方式，按优先级返回 { cmd, prefix, kind } 或 null。
+ * 1) 配置的 dsh 命令（默认 'dsh'，即 npm 全局安装、已写入 PATH）；
+ * 2) 官网 Windows 桌面版内置 CLI（无需 PATH / npm / Node，桌面版自带 Electron runtime）；
+ * 3) npx 缓存安装（npx 安装只缓存到 npx 目录，不写全局 PATH，
  *    此时 'dsh' 不在 PATH 里，但 'npx @deepseek-ai/dsh' 仍可运行）。
  * 探测 npx 用 --no-install：只检查本地/全局/npx 缓存，缺失时不触发下载，
  * 从而保留「完全未安装时弹出安装提示」的既有流程。
- * @returns {Promise<{cmd: string, prefix: string[]} | null>}
+ * @param {{probe?: (cmd: string, args: string[]) => Promise<boolean>, desktop?: {cmd: string, installDir?: string} | null}} [opts]
+ *   测试注入口：probe 替换命令探测，desktop 替换桌面版定位结果。
+ * @returns {Promise<{cmd: string, prefix: string[], kind: string, installDir?: string} | null>}
  */
-async function resolveDshInvocation() {
+async function resolveDshInvocation(opts) {
+  const probe = (opts && opts.probe) || runCommandOk;
   const cmd = getDshCommand();
-  if (await runCommandOk(cmd, ['--version'])) {
-    return { cmd, prefix: [] };
+  if (await probe(cmd, ['--version'])) {
+    return { cmd, prefix: [], kind: 'command' };
   }
-  if (await runCommandOk('npx', ['--no-install', '@deepseek-ai/dsh', '--version'])) {
-    return { cmd: 'npx', prefix: ['--yes', '@deepseek-ai/dsh'] };
+  const hasDesktopOverride = !!opts && Object.prototype.hasOwnProperty.call(opts, 'desktop');
+  const desktop = hasDesktopOverride ? opts.desktop : await findDesktopDshCli();
+  if (desktop) {
+    if (await probe(desktop.cmd, ['--version'])) {
+      console.info('[DeepSeek Harness] 使用官网 Windows 桌面版内置 dsh：' + desktop.cmd);
+      return { cmd: desktop.cmd, prefix: [], kind: 'desktop', installDir: desktop.installDir };
+    }
+    console.warn('[DeepSeek Harness] 检测到官网桌面版，但其内置 dsh CLI 无法运行：' + desktop.cmd);
+  }
+  if (await probe('npx', ['--no-install', '@deepseek-ai/dsh', '--version'])) {
+    return { cmd: 'npx', prefix: ['--yes', '@deepseek-ai/dsh'], kind: 'npx' };
   }
   return null;
 }
@@ -248,7 +362,11 @@ async function ensureDshInstalled() {
       await installDsh();
       return true;
     } catch (e) {
-      vscode.window.showErrorMessage(`DeepSeek Harness 安装失败：${e.message}`);
+      // 桌面版用户通常没有 Node/npm：明确给出「装桌面版」这条路，别让用户去翻日志。
+      const hint = process.platform === 'win32'
+        ? '（也可改用官网 Windows 桌面版，扩展会自动识别它；或在 dshPanel.dshCommand 里直接指定其 CLI 路径）'
+        : '';
+      vscode.window.showErrorMessage(`DeepSeek Harness 安装失败：${e.message}${hint}`);
       return false;
     }
   });
@@ -1011,7 +1129,7 @@ async function apiBase() {
  * @returns {Promise<import('child_process').ChildProcess>}
  */
 async function startDsh() {
-  // 使用 ensureDshInstalled 解析出的启动方式（全局 dsh 或 npx）。
+  // 使用 ensureDshInstalled 解析出的启动方式（PATH 上的 dsh / 官网桌面版内置 CLI / npx）。
   // 兜底回退到配置的命令，避免异常时序下拿到空值。
   const inv = dshInvocation || { cmd: getDshCommand(), prefix: [] };
   // host/port 均已净化（getHost 白名单 / getPort 整数），cmd 经 sanitizeCommand
@@ -1036,9 +1154,9 @@ async function startDsh() {
     }
   }
   // Windows 经 cmd.exe 启动：含空格的 cmd 需区分两种形态——
-  //   a) 单个存在的可执行文件（带空格目录）→ 整体加引号；
+  //   a) 单个存在的可执行文件（带空格目录，含官网桌面版内置 dsh.cmd）→ 整体加引号；
   //   b) 多 token 命令行前缀（如 "node C:\x\dsh.js"）→ 原样透传由 shell 分词（≤0.8.33 行为）。
-  const cmdText = (process.platform === 'win32' && /\s/.test(inv.cmd) && fs.existsSync(inv.cmd)) ? '"' + inv.cmd + '"' : inv.cmd;
+  const cmdText = shellCommandText(inv.cmd);
   const child = spawn(cmdText, args, {
     cwd: getWorkspaceDir(),
     shell: process.platform === 'win32',
@@ -1731,20 +1849,22 @@ async function installPluginViaNpm(profileDir, plugin) {
   }
 }
 
-/** 尝试用官方 dsh plugin add 安装（依赖 dsh + pnpm）；成功返回 true。 */
+/** 尝试用官方 dsh plugin add 安装（依赖 dsh + pnpm；桌面版则用其自带 pnpm）；成功返回 true。 */
 function tryDshPluginAdd(plugin) {
   // 安全面守卫：plugin 仅允许内置常量（win32 经 shell 拼接）。
   if (plugin !== DSH_PLUGIN_NAME) {
     return Promise.resolve(false);
   }
   return new Promise((resolve) => {
-    const cmd = process.platform === 'win32' ? 'dsh.cmd' : 'dsh';
+    // 用已解析的启动方式（PATH 上的 dsh / 官网桌面版内置 CLI / npx）：桌面版用户
+    // 没有全局 dsh，写死 'dsh.cmd' 会让配套插件永远装不上。
+    const inv = dshInvocation || { cmd: process.platform === 'win32' ? 'dsh.cmd' : 'dsh', prefix: [] };
     const env = Object.assign({}, process.env, {
       // npm 全局 bin 前置，避开旧 corepack shim 干扰 pnpm
       Path: path.join(os.homedir(), 'AppData', 'Roaming', 'npm') + path.delimiter + (process.env.Path || process.env.PATH || ''),
       npm_config_registry: NPMJS_REGISTRY
     });
-    const child = spawn(cmd, ['plugin', '--profile', 'web', 'add', plugin], {
+    const child = spawn(shellCommandText(inv.cmd), [...inv.prefix, 'plugin', '--profile', 'web', 'add', plugin], {
       stdio: 'ignore',
       env,
       windowsHide: true,
@@ -2248,7 +2368,9 @@ async function preparePanelHtml(isTab) {
     return {
       ok: false,
       kind: 'not-installed',
-      reason: '未检测到 DeepSeek Harness (dsh)，且已取消安装。请手动安装后点击“刷新”。'
+      reason: process.platform === 'win32'
+        ? '未检测到 DeepSeek Harness（npm 版 dsh 或官网 Windows 桌面版），且已取消安装。请安装后点击“刷新”。'
+        : '未检测到 DeepSeek Harness (dsh)，且已取消安装。请手动安装后点击“刷新”。'
     };
   }
 
@@ -4179,6 +4301,12 @@ module.exports.__internals = {
   getHost,
   getPort,
   getDshCommand,
+  shellCommandText,
+  parseRegInstallLocations,
+  pickDesktopCli,
+  probeDesktopDshCli,
+  findDesktopDshCli,
+  resolveDshInvocation,
   runCommandOk,
   runCommandOutput,
   isLocalLoopbackTarget,
