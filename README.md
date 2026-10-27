@@ -11,6 +11,29 @@
 
 > **版本适配**：本扩展 **v0.8.34 起**适配 **dsh v0.1.2-rc.1 及以上版本**——自动完成该版本起新增的 Web 浏览器认证（扩展受管认证代理，面板与 Copilot 桥接全程免登录、免打扰，详见下文「dsh web 浏览器认证」）；同时**向下兼容**未启用认证的旧版 dsh（启动参数探测、RPC 端点新旧格式自动回退）。**1.0.0 起**同步适配 **dsh 0.2.x** 的回答事件通道（`assistant/message`，旧的 `assistant/chunk` 仍兼容），并跟随 DeepSeek 现役模型（`deepseek-flash` = V4.1-Flash、`deepseek-v4-pro`）。
 
+## 🆕 最近版本新增功能
+
+### v1.0.2 —— 支持 Remote-SSH / Dev Containers（2026-10）
+
+- **真远程面板不再 401（修复 Issue #24）**：此前 `isLocalLoopbackTarget()` 在 `remoteName` 非 `wsl` 时一律禁用受管认证代理，远程窗口里 dsh 明明已经启动、面板却只显示「无法连接 DeepSeek Harness」。现在扩展改为按 `dshPanel.url` 是否回环判定代理可用性（扩展声明 `extensionKind: workspace`，真远程下扩展宿主与 dsh 本来就同机），真远程时：
+  - 代理仍在服务器回环随机端口，面板地址经 `vscode.env.asExternalUri` 转发到客户端再加载（首次提示允许端口转发即可）；
+  - **Copilot 桥接**的 `/api` 调用同样走代理，不再 401；
+  - **「在浏览器中打开」**也经转发，打开的是服务器上的 DSH，而不是客户端本机的 `127.0.0.1:3080`。
+- **安全加固**：远程模式下代理只放行「Host = 扩展已转发给客户端的 authority」的匿名请求（其余一律 403），扩展自身请求带一次性随机密钥头 `x-dsh-proxy-key`；新增配置 `dshPanel.remoteAuthProxy`（默认 `true`）——多用户共享服务器建议关闭，关闭后面板回到「浏览器认证引导」。
+- **可读的错误页**：`asExternalUri` 失败（端口转发被禁用/拒绝）时，面板直接说明原因，不再白屏。
+- **边界**：Codespaces / Remote Tunnels 等转发到公网 HTTPS 域名的场景暂未覆盖（dsh 的 `/api` 围栏只接受回环 authority）；真远程下标签页与侧边栏的 origin 隔离可能退化为同源（「单活动视图」策略仍然生效）。
+
+### v1.0.1 —— 支持官网 Windows 桌面版（2026-10）
+
+- **桌面版用户开箱可用**：从官网下载安装的 Windows 桌面版把 dsh 运行时内嵌在 Electron 的 `app.asar` 里，`dsh` 不在 PATH、用户通常也没有 npm，旧版会把「已安装桌面版」误判为「未安装」。现在扩展会自动探测：
+  - **安装位置**：注册表卸载项的 `InstallLocation` 优先（兼容 HKCU/HKLM 机器级安装），兜底 `%LOCALAPPDATA%\Programs\DeepSeek Harness` 等默认目录；
+  - **启动方式**：`<安装目录>\resources\runtime\cli\bin\dsh.cmd web …`——**不需要 PATH / npm / Node**（桌面版自带 Electron runtime），启动的仍是 `web` profile，配套插件与受管认证代理照旧生效；
+  - **优先级**：`dshPanel.dshCommand`（或 PATH 上的 `dsh`）→ 桌面版内置 CLI → `npx`。
+- **与桌面 App 的关系**：桌面 App 自己的后端固定 `127.0.0.1:19387` + 保留的 `desktop` profile 且带浏览器认证（令牌只经 Electron IPC 下发，外部无法复用），因此面板**不接管**它，而是用同一个 `~/.dsh` 起一个独立 web 实例：**会话与凭据共享，插件与界面设置各自独立**（同一个会话在 App 与 VS Code 面板里都能看到）。
+- 「未安装」错误页与 npm 安装失败提示都补充了桌面版这条出路，并给出 `dshPanel.dshCommand` 指定路径的写法。
+
+> 两个版本的完整变更记录（含测试与验证细节）见 [CHANGELOG.md](./CHANGELOG.md)。
+
 ## 🙏 致谢
 
 - [Pelapis](https://github.com/Pelapis)——贡献 macOS 面板剪贴板快捷键修复并迭代收敛作用域（内置插件 `dsh-webview-clipboard`，PR #11、#14）。
@@ -53,7 +76,7 @@
 - 面板按钮：刷新（不打断运行中的任务）/ 重启 dsh web / 在浏览器中打开；字号跟随 `editor.fontSize` 等比缩放（CSS zoom 实现，非整数倍缩放同样清晰）；
 - **发送选中内容 / 拖放文件到 DSH 对话框**（自动安装配套插件 `dsh-drop-caret`）：把文件、文件夹、代码段以 `路径:行号` 引用精确插入对话框光标处——**从 VS Code 资源管理器拖拽直接引用源文件本身**（不产生副本）；从系统文件管理器拖入时浏览器无法取得真实路径，此时才回退为工作区 `.dsh-drop/` 下的内容快照。点击 DSH 对话中的外链在系统浏览器打开（配合 DSH 插件 `dsh-open-links`）。
 - **macOS 剪贴板快捷键修复（自动安装配套插件 `dsh-webview-clipboard`）**：修复 macOS 上面板内 ⌘C/⌘V/⌘X 失效的问题——DSH 页面以跨源 iframe 内嵌于 webview 时，浏览器的原生剪贴板默认动作不会发生。插件注入 DSH 页面后拦截这三个键并经 execCommand 显式执行。仅 macOS + 被内嵌时启用，其余环境行为不变。
-- **点击对话里的工作区文件/文件夹链接 → 在 VS Code 资源管理器中定位并打开（自动安装配套插件 `dsh-vscode-file-links`，v0.8.46 起）**：模型回答里的 `src/a.ts`、`docs/` 这类工作区相对路径链接，原本点击后会在 DSH 侧边栏打开；现在在面板内点击会改为在本窗口的**资源管理器**中定位并打开（文件同时打开编辑器，文件夹仅定位）。**前提**：目标必须位于当前 VS Code 打开的工作区内且真实存在——不满足时自动回落到原来的 DSH 侧边栏行为，绝不出现「点了没反应」。详见下文专节。
+- **点击对话里的工作区文件/文件夹链接 → 在 VS Code 资源管理器中定位并打开（自动安装配套插件 `dsh-vscode-file-links`，v1.0.0 起）**：模型回答里的 `src/a.ts`、`docs/` 这类工作区相对路径链接，原本点击后会在 DSH 侧边栏打开；现在在面板内点击会改为在本窗口的**资源管理器**中定位并打开（文件同时打开编辑器，文件夹仅定位）。**前提**：目标必须位于当前 VS Code 打开的工作区内且真实存在——不满足时自动回落到原来的 DSH 侧边栏行为，绝不出现「点了没反应」。详见下文专节。
 
 ### 使用示例：发送选中内容到对话框
 
@@ -86,7 +109,7 @@
 | `dshPanel.installClipboardPlugin` | `true` | 自动安装内置 `dsh-webview-clipboard` 插件（修复 macOS 面板内编辑快捷键；Windows/Linux 上为惰性文件不影响行为）。怀疑影响 dsh web 启动时可关闭对比 |
 | `dshPanel.workspaceFileLinkAction` | `revealAndOpen` | 对话里工作区文件/文件夹链接的点击行为：`revealAndOpen` 资源管理器定位并打开 / `revealOnly` 仅定位 / `off` 不接管（保持 DSH 侧边栏打开，也不安装配套插件） |
 
-### 点击对话里的文件/文件夹链接 → 在 VS Code 资源管理器中定位（v0.8.46 起）
+### 点击对话里的文件/文件夹链接 → 在 VS Code 资源管理器中定位（v1.0.0 起）
 
 模型回答里的工作区路径链接（指向 `src/a.ts`、`docs/` 这类路径的 Markdown 链接）在 DSH 里是
 可点击的：DSH 会把它们打开在自己的右侧边栏。本扩展在面板内把这一点击改接到 VS Code：
@@ -176,7 +199,7 @@ DeepSeek 于 2026-09-10 发布 **DeepSeek-V4.1-Flash**（原生多模态），�
 
 > DSH 的 `session.selectModel` 会校验模型是否登记在 `llm-deepseek` 配置里，未登记的 id 会报 `session/model-unavailable` 并被扩展**静默**回落成 DSH 默认模型——所以映射用的是「DSH 侧真实模型 id」而非 DeepSeek API 的兼容旧名。v0.8.48 起每次会话首次提问还会做一次漂移自检（读 DSH 的 `session/modelCatalog`），映射失配时直接弹告警而不是继续静默。
 >
-> 条目名与映射随 DeepSeek 模型更新：0.8.47 及更早的 `DeepSeek-V4-Flash (DSH)` / `deepseek-v4-flash-vision-exp (DSH)` 条目已移除，若旧会话/设置里仍留存这些条目 id，扩展仍会把它们解析到 `deepseek-flash`。发现下拉框里的名字与实际模型不符时，通常意味着需要升级本扩展。
+> 条目名与映射随 DeepSeek 模型更新：v1.0.0 之前的 `DeepSeek-V4-Flash (DSH)` / `deepseek-v4-flash-vision-exp (DSH)` 条目已移除，若旧会话/设置里仍留存这些条目 id，扩展仍会把它们解析到 `deepseek-flash`。发现下拉框里的名字与实际模型不符时，通常意味着需要升级本扩展。
 
 ### 切换模型再切回
 
@@ -228,7 +251,7 @@ DSH：用自己的一套 harness（记忆 / 技能 / AGENTS.md / 工具 / agent 
 本扩展：增量流式回写 Copilot 聊天框
 ```
 
-> **回答通道（v0.8.49 修复）**：dsh 0.2.x 起助手正文改为「每个 step 一条 `assistant/message`」
+> **回答通道（v1.0.0 修复）**：dsh 0.2.x 起助手正文改为「每个 step 一条 `assistant/message`」
 > 事件（正文在 `data.message.content` 的 `text` 块里，`reasoning` / `tool-call` 块不外发），
 > 旧的 `assistant/chunk` 增量通道已不再发送。扩展现在两代协议都认：新协议按消息回写，
 > 旧协议仍按 `text-delta` 增量回写（历史回放里只有整块 `block-end` 时用整块文本、不重复）。
