@@ -13,6 +13,14 @@
 
 ## 🆕 最近版本新增功能
 
+### v1.1.0 —— Remote-WSL / Remote-SSH 下登录 DeepSeek 账号（在本机浏览器打开授权页，2026-10）
+
+- **修复：远端窗口里点「登录」没有反应**。DSH 的账号登录由页面内的 `BrowserLogin` 驱动：先 `window.open('about:blank')` 预开一个标签页，拿到授权链接后再把该页导航过去。但面板把 DSH 以跨源 iframe 内嵌进 VS Code webview，webview **不允许新开窗口**（`window.open` 返回 null），而 WSL / Remote-SSH 的远端又没有图形浏览器可以兜底——登录流程因此卡在「没有自动打开新页面？」。
+- 现在内置插件 **`dsh-vscode-open-external`** 接管面板内网页的 `window.open`：对 `about:blank` 预开页返回一个可导航的占位对象，等 DSH 把授权链接 `location.replace(...)` 过来后，经 webview 中继交给扩展宿主 `vscode.env.openExternal`，用**客户端**（WSL/Remote 场景即你 Windows 本机）的默认浏览器打开授权页；登录回跳地址是 DSH 所在机器的回环地址，Windows 经 WSL localhost 转发可达，登录完成后面板自动刷新为「已登录」。
+- **只转交 http/https 链接**（含长度校验），并且**只在宿主握手之后**接管——独立浏览器 / 其它宿主里行为完全不变；`file`、`javascript:` 等 scheme 一律回退原生行为。
+- 控制项：`dshPanel.installOpenExternalPlugin`（默认 `true`，v1.1.0 新增；关闭后回到旧行为）。
+- 手动兜底（任何版本都可用）：登录对话框里的「复制登录链接」，把授权链接复制到 Windows 浏览器打开，同样能完成登录。
+
 ### v1.0.2 —— 支持 Remote-SSH / Dev Containers（2026-10）
 
 - **真远程面板不再 401（修复 Issue #24）**：此前 `isLocalLoopbackTarget()` 在 `remoteName` 非 `wsl` 时一律禁用受管认证代理，远程窗口里 dsh 明明已经启动、面板却只显示「无法连接 DeepSeek Harness」。现在扩展改为按 `dshPanel.url` 是否回环判定代理可用性（扩展声明 `extensionKind: workspace`，真远程下扩展宿主与 dsh 本来就同机），真远程时：
@@ -107,6 +115,7 @@
 | `dshPanel.killOnDispose` | `true` | 扩展停用时是否结束它启动的 dsh |
 | `dshPanel.openSystemBrowser` | `false` | 扩展启动 dsh 时是否保留弹系统浏览器的旧行为 |
 | `dshPanel.installClipboardPlugin` | `true` | 自动安装内置 `dsh-webview-clipboard` 插件（修复 macOS 面板内编辑快捷键；Windows/Linux 上为惰性文件不影响行为）。怀疑影响 dsh web 启动时可关闭对比 |
+| `dshPanel.installOpenExternalPlugin` | `true` | 自动安装内置 `dsh-vscode-open-external` 插件（v1.1.0 起）：面板内 `window.open`（典型：DeepSeek 账号登录授权页）改在本机系统浏览器打开——Remote-WSL / Remote-SSH 下由你的 Windows 浏览器打开 |
 | `dshPanel.workspaceFileLinkAction` | `revealAndOpen` | 对话里工作区文件/文件夹链接的点击行为：`revealAndOpen` 资源管理器定位并打开 / `revealOnly` 仅定位 / `off` 不接管（保持 DSH 侧边栏打开，也不安装配套插件） |
 
 ### 点击对话里的文件/文件夹链接 → 在 VS Code 资源管理器中定位（v1.0.0 起）
@@ -273,7 +282,7 @@ DSH：用自己的一套 harness（记忆 / 技能 / AGENTS.md / 工具 / agent 
 
 ## 🌱 版本状态声明
 
-**1.0.0 起为正式版本；1.0.1 增加官网 Windows 桌面版支持；1.0.2 支持 Remote-SSH / Dev Containers**：忠实窗口（面板）与 Copilot 桥接两条能力线都已长期自用 + 回归测试覆盖，功能完整可用：
+**1.0.0 起为正式版本；1.0.1 增加官网 Windows 桌面版支持；1.0.2 支持 Remote-SSH / Dev Containers；1.1.0 支持在远端面板里用本机浏览器完成 DeepSeek 账号登录**：忠实窗口（面板）与 Copilot 桥接两条能力线都已长期自用 + 回归测试覆盖，功能完整可用：
 
 - 两条能力线：**忠实窗口**（把 DSH Web GUI 原样内嵌到侧边栏 / 编辑器标签页）与 **Copilot 桥接**（把 DSH 注册为 VS Code 聊天模型）——桥接仍在持续跟进 DeepSeek 模型与 dsh 版本演进，遇到不一致会在扩展内明确告警而不是静默降级；
 - 欢迎大家在不同操作系统（Windows / macOS / Linux，以及 Remote-SSH、WSL、Dev Containers 等远程场景）中测试使用；

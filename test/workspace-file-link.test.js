@@ -144,7 +144,8 @@ ok(script.includes('/^https?:\\/\\//i'), '既有外链正则的反斜杠转义�
 
 const scriptOff = /<script nonce="[^"]*">([\s\S]*?)<\/script>/.exec(I.buildIframeHtml('http://127.0.0.1:3080', 1, 'off'))[1];
 ok(scriptOff.includes('var fileLinkMode = "off"'), 'off 模式注入 off');
-ok(scriptOff.includes("if (fileLinkMode === 'off') return;"), 'off 模式不给握手回执（插件保持惰性）');
+ok(scriptOff.includes('fileLinks: fileLinkMode !== \'off\''), 'off 模式的握手回执明确 fileLinks=false（文件链接插件保持惰性）');
+ok(scriptOff.includes('openExternal: true'), 'off 模式仍允许外链/登录链接转交（v1.1.0）');
 ok(I.buildIframeHtml('http://127.0.0.1:3080', 1, 'nonsense').includes('var fileLinkMode = "off"'), '非法模式值收敛为 off（不误接管）');
 ok(I.buildIframeHtml('http://127.0.0.1:3080', 1, undefined).includes('var fileLinkMode = "off"'), '未传模式时收敛为 off（老调用点不误接管）');
 let threw = false;

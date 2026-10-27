@@ -1,0 +1,5 @@
+# dsh-vscode-open-external bundle patch: one insert registering the dual-face plugin.
+# The row name must match the npm package name and the host half's exported `name`.
+- insert:
+    - id: vscode-open-external
+      name: 'dsh-vscode-open-external'

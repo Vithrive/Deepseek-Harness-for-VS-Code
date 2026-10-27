@@ -1756,6 +1756,7 @@ function buildIframeHtml(url, scale, requestedFileLinkMode) {
   // source = PLUGIN_ID，本 webview 回消息时带 source = HOST_ID。
   var HOST_ID = ${jsonForScript(VSCODE_HOST_ID)};
   var PLUGIN_ID = ${jsonForScript(FILE_LINK_PLUGIN_SOURCE)};
+  var OPEN_PLUGIN_ID = ${jsonForScript(OPEN_EXTERNAL_PLUGIN_SOURCE)};
   var FRAME_ORIGIN = ${jsonForScript(origin)};
   var fileLinkMode = ${jsonForScript(fileLinkMode)};
   function frameWindow() {
@@ -1773,10 +1774,16 @@ function buildIframeHtml(url, scale, requestedFileLinkMode) {
     if (!w) return;
     try { w.postMessage(payload, FRAME_ORIGIN); } catch (e) { /* 页面正在切换：忽略 */ }
   }
-  /** 握手回执：插件据此确认「外层是本 VS Code 面板，可以接管文件链接点击」。 */
+  /** 握手回执：插件据此确认「外层是本 VS Code 面板」。fileLinks=false 表示不接管
+   *  文件链接（插件保持惰性），openExternal=true 表示可以转交外链/登录链接。 */
   function ackFrame() {
-    if (fileLinkMode === 'off') return;
-    postToFrame({ source: HOST_ID, type: 'ack', fileLinks: true, mode: fileLinkMode });
+    postToFrame({
+      source: HOST_ID,
+      type: 'ack',
+      fileLinks: fileLinkMode !== 'off',
+      openExternal: true,
+      mode: fileLinkMode
+    });
   }
   if (frame) {
     // iframe 每次加载（刷新 / 重启 dsh web）后重新握手，兼容插件先于或后于本脚本就绪。
@@ -1811,6 +1818,22 @@ function buildIframeHtml(url, scale, requestedFileLinkMode) {
           token: data.token.slice(0, 64),
           path: data.path.slice(0, 4096)
         });
+      }
+      return;
+    }
+    if (data.source === OPEN_PLUGIN_ID) {
+      // 外链/登录链接插件：DSH 页面里的 window.open 无法真正打开浏览器窗口，
+      // 由插件把 http(s) 链接转交宿主，用系统默认浏览器（Remote/WSL 下即客户端）打开。
+      if (!fromOurFrame(event)) return;
+      if (data.type === 'hello') {
+        ackFrame();
+        return;
+      }
+      if (data.type === 'open' && typeof data.url === 'string') {
+        var link = data.url.trim();
+        if (link.length > 0 && link.length <= 8192 && /^https?:\\/\\//i.test(link)) {
+          vscode.postMessage({ type: 'dsh-open-link', url: link });
+        }
       }
       return;
     }
@@ -1880,11 +1903,17 @@ const CLIPBOARD_PLUGIN_VERSION = '0.2.1';
 // DSH web profile，不经 npm）：点对话里的工作区文件/文件夹链接时，改为在本窗口的
 // VS Code 资源管理器中定位并打开。
 const FILE_LINK_PLUGIN_NAME = 'dsh-vscode-file-links';
+// 内置分发的外链/登录链接插件（源码在 dsh-plugins/ 目录，随扩展文件直接写入
+// DSH web profile，不经 npm）：DSH 页面被跨源 iframe 内嵌时 window.open 打不开
+// 浏览器窗口（DeepSeek 账号登录正是这条路径），由插件把链接交给宿主的
+// vscode.env.openExternal，在客户端（如 WSL/Remote 下的 Windows 本机）浏览器打开。
+const OPEN_EXTERNAL_PLUGIN_NAME = 'dsh-vscode-open-external';
 // 插件源码所在目录（打包进 .vsix，运行时按单一源头读取，避免模板字面量转义问题）。
 const BUNDLED_PLUGINS_DIR = 'dsh-plugins';
 // DSH 页面（iframe）与 webview 之间的握手 / 转发协议标识。
 const VSCODE_HOST_ID = 'dsh-vscode-host';
 const FILE_LINK_PLUGIN_SOURCE = 'dsh-vscode-file-links';
+const OPEN_EXTERNAL_PLUGIN_SOURCE = 'dsh-vscode-open-external';
 // 文件链接点击行为：资源管理器定位 + 打开文件 / 仅定位 / 不接管（保持 DSH 行为）。
 const FILE_LINK_ACTION_KEY = 'dshPanel.workspaceFileLinkAction';
 const FILE_LINK_ACTIONS = ['revealAndOpen', 'revealOnly', 'off'];
@@ -2259,6 +2288,58 @@ async function ensureFileLinkPlugin(profileDir) {
 }
 
 /**
+ * 内置外链/登录链接插件 dsh-vscode-open-external 的文件清单（相对路径 → 内容）。
+ * @returns {Record<string, string>} 相对路径 → 文件内容
+ */
+function openExternalPluginFiles() {
+  const base = path.join(__dirname, BUNDLED_PLUGINS_DIR, OPEN_EXTERNAL_PLUGIN_NAME);
+  const rels = ['package.json', 'cordis.patch.yml', 'lib/index.js', 'lib/client.js'];
+  const files = {};
+  for (const rel of rels) {
+    files[rel] = fs.readFileSync(path.join(base, rel), 'utf8');
+  }
+  return files;
+}
+
+/** 内置外链/登录链接插件的版本（以插件自己的 package.json 为单一源头）。 */
+function openExternalPluginVersion() {
+  try {
+    return JSON.parse(openExternalPluginFiles()['package.json']).version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+/**
+ * 确保内置插件 dsh-vscode-open-external 已落盘并声明（不经 npm）。
+ * @returns {Promise<boolean>} 本次是否发生新增/升级（true 时需重启 dsh web 生效）。
+ */
+async function ensureOpenExternalPlugin(profileDir) {
+  try {
+    const version = openExternalPluginVersion();
+    const installed = await installedPluginVersion(profileDir, OPEN_EXTERNAL_PLUGIN_NAME);
+    if (installed === version) {
+      await ensureProfileDeclaration(profileDir, OPEN_EXTERNAL_PLUGIN_NAME, null);
+      return false; // 版本一致，无需写入
+    }
+    const files = openExternalPluginFiles();
+    const base = path.join(profileDir, 'node_modules', OPEN_EXTERNAL_PLUGIN_NAME);
+    for (const rel of Object.keys(files)) {
+      const dest = path.join(base, rel);
+      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+      await fs.promises.writeFile(dest, files[rel], 'utf8');
+    }
+    // dependencies 不写入该包（npm 注册表上没有），只登记 bundles 供 DSH 加载。
+    await ensureProfileDeclaration(profileDir, OPEN_EXTERNAL_PLUGIN_NAME, null);
+    return true;
+  } catch (e) {
+    console.error(`[DeepSeek Harness] 安装内置插件 ${OPEN_EXTERNAL_PLUGIN_NAME} 失败：`, e);
+    vscode.window.showWarningMessage(`安装 DSH 外链打开插件 ${OPEN_EXTERNAL_PLUGIN_NAME} 失败：${e.message}`);
+    return false;
+  }
+}
+
+/**
  * 工作区文件链接的点击行为配置。
  * @returns {'revealAndOpen'|'revealOnly'|'off'}
  */
@@ -2301,6 +2382,14 @@ async function ensureDshPlugins() {
     // 配置为 off（不接管）时不安装/不更新，插件不动 DSH 既有行为。
     if (fileLinkAction() !== 'off') {
       if (await ensureFileLinkPlugin(profileDir)) {
+        changed = true;
+      }
+    }
+    // 内置外链/登录链接插件（文件随扩展直接写入，不走 npm）：
+    // 面板内 window.open（典型：DeepSeek 账号登录的授权页）改为在客户端系统浏览器打开。
+    // 可经 dshPanel.installOpenExternalPlugin 关闭。
+    if (cfg().get('dshPanel.installOpenExternalPlugin', true)) {
+      if (await ensureOpenExternalPlugin(profileDir)) {
         changed = true;
       }
     }
@@ -4409,6 +4498,11 @@ module.exports.__internals = {
   ensureFileLinkPlugin,
   FILE_LINK_PLUGIN_NAME,
   fileLinkAction,
+  openExternalPluginFiles,
+  openExternalPluginVersion,
+  ensureOpenExternalPlugin,
+  OPEN_EXTERNAL_PLUGIN_NAME,
+  OPEN_EXTERNAL_PLUGIN_SOURCE,
   buildIframeHtml,
   handleWebviewMessage,
   resolveWorkspaceTarget,

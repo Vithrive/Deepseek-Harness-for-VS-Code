@@ -2,6 +2,21 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。完整提交历史见 [GitHub](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/commits/main)。
 
+## 1.1.0 —— Remote-WSL / Remote-SSH 下用本机浏览器登录 DeepSeek 账号
+
+**忠实窗口（面板）**
+
+- **修复：远端窗口（Remote-WSL / Remote-SSH / Dev Containers）里点 DSH 的「登录」没有反应**。DSH 的登录由页面内 `BrowserLogin` 驱动：`window.open('about:blank')` 预开页 → 拿到 Host 授权链接后 `popup.location.replace(url)`。面板把 DSH 以跨源 iframe 内嵌进 VS Code webview，而 webview 不允许新开窗口（`window.open` 返回 null），远端也没有图形浏览器兜底，登录流程卡在「没有自动打开新页面？」。
+- 新增内置插件 **`dsh-vscode-open-external`**（随扩展分发，不经 npm）：接管面板内网页的 `window.open` —— 对 `about:blank` 预开页返回可导航的占位对象，DSH 把授权链接 `location.replace/assign/href` 过来后，经 webview 中继交给扩展宿主 `vscode.env.openExternal`，在**客户端**（WSL/Remote 场景即本机 Windows）默认浏览器打开授权页；登录回跳地址是 DSH 所在机器的回环，Windows 经 WSL localhost 转发可达，完成后面板自动刷新为已登录。
+- 安全与兼容边界：只转交 http/https 链接（长度校验）、仅在宿主握手后接管；`file:` / `javascript:` 等一律回退原生行为；独立浏览器里行为不变；新增配置 `dshPanel.installOpenExternalPlugin`（默认 `true`）可关闭。
+- 手动兜底：登录对话框的「复制登录链接」仍可把授权链接复制到本机浏览器打开（任何版本可用）。
+
+**测试**
+
+- 新增 `open-external-plugin` 测试套（43 项）：插件文件/声明完整性、客户端握手前后行为、`about:blank` 占位对象导航转交、非法 scheme/超长链接回退、webview 中继（ack/open/边界/off 模式仍可登录）、宿主侧 `dsh-open-link` 只放行 http(s)。
+- 更新 `file-link-bridge` / `workspace-file-link` 断言：握手回执新增 `openExternal` 字段，`off` 模式改为「`fileLinks:false` 但允许外链/登录链接」。
+- 全套 15 个测试套件通过（411 项断言 + 真实 dsh e2e）。
+
 ## 1.0.2 —— 支持 Remote-SSH / Dev Containers（Issue #24）
 
 **忠实窗口（面板）**

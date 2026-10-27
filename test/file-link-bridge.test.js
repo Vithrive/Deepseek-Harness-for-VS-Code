@@ -179,11 +179,13 @@ function makeWebviewRealm(mode) {
     ok(wv.toHost.length === 1 && wv.toHost[0].token.length <= 64 && wv.toHost[0].path.length <= 4096, '超长 token/path 被截断（不放大到宿主）');
   }
 
-  console.log('[5] off 模式：只做环境标记，不握手不转发');
+  console.log('[5] off 模式：ack 明确 fileLinks=false，不转发文件链接');
   {
     const wv = makeWebviewRealm('off');
     wv.fireLoad();
-    ok(wv.frameMessages.length === 0, 'off 模式不发 ack（DSH 页面内插件保持惰性）');
+    const acks = wv.frameMessages.filter((m) => m.payload.type === 'ack');
+    ok(acks.length >= 1 && acks[0].payload.fileLinks === false, 'off 模式的 ack 明确 fileLinks=false（文件链接插件保持惰性）');
+    ok(acks[0].payload.openExternal === true, 'off 模式仍允许外链/登录链接（v1.1.0 起）');
     wv.fromPlugin({ source: 'dsh-vscode-file-links', type: 'reveal', token: 't', path: 'package.json' });
     ok(wv.toHost.length === 0, 'off 模式不把 reveal 转发给宿主');
   }
