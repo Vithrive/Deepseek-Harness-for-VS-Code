@@ -4148,6 +4148,57 @@ function registerDshModelProvider(context) {
 }
 
 /**
+ * 注册 DSH 为聊天参与者（Chat Participant，@DeepSeek Harness）：
+ * 与 Codex / Claude Code 平行出现在 VS Code 对话入口（输入 @ 选择或模型选择器）。
+ * 需要 VS Code 1.98+（vscode.chat.createChatParticipant）。
+ */
+function registerDshChatParticipant(context) {
+  if (!vscode.chat || typeof vscode.chat.createChatParticipant !== 'function') {
+    console.warn('[DeepSeek Harness] vscode.chat 不可用（需 VS Code 1.98+），跳过聊天参与者注册');
+    return;
+  }
+  if (!cfg().get('dshPanel.enableDshChat', true)) return;
+  try {
+    const participant = vscode.chat.createChatParticipant('dsh', async (request, chatContext, stream, token) => {
+      // 组装 messages：历史（chatContext.history）+ 当前提问（request.prompt）
+      const messages = [];
+      const history = (chatContext && chatContext.history) || [];
+      for (const turn of history) {
+        if (!turn) continue;
+        const isAssistant = !!(turn.participant);
+        const text = String((isAssistant ? turn.response : turn.prompt) || turn.prompt || '');
+        if (text) {
+          messages.push({ role: isAssistant ? 'assistant' : 'user', content: text });
+        }
+      }
+      messages.push({ role: 'user', content: String((request && request.prompt) || '') });
+      // 复用语言模型提供方的 DSH 请求管线（会话映射/流式回放/工具执行/推理档位）
+      const modelMock = { id: 'dsh', vendor: 'dsh', family: 'dsh', name: 'DeepSeek Harness' };
+      const progressAdapter = {
+        report(part) {
+          if (!part) return;
+          const text = (part && part.text) || (part && part.value) || '';
+          if (text) {
+            try { stream.progress(String(text)); } catch (_) { /* 忽略 */ }
+          }
+        }
+      };
+      await handleDshModelRequest(modelMock, messages, {}, progressAdapter, token);
+    }, {
+      name: 'DeepSeek Harness',
+      fullName: 'DeepSeek Harness',
+      description: '在工作区解析任务、执行工具后解答（DSH 引擎）',
+      isSticky: true,
+      iconPath: vscode.Uri.joinPath(context.extensionUri, 'media', 'icon.svg')
+    });
+    context.subscriptions.push(participant);
+    console.log('[DeepSeek Harness] 聊天参与者已注册（@DeepSeek Harness 可用）');
+  } catch (e) {
+    console.error('[DeepSeek Harness] 注册聊天参与者失败：', e);
+  }
+}
+
+/**
  * 诊断：列出 VS Code 语言模型注册表里的模型及其 metadata（含 configurationSchema 是否存在），
  * 与 vizards（vendor=deepseek）对比，用于定位「推理档位」UI 不渲染的原因。
  */
@@ -4235,6 +4286,7 @@ async function authStatusText() {
 function activate(context) {
   gContext = context;
   registerDshModelProvider(context);
+  registerDshChatParticipant(context);
 
   const provider = {
     resolveWebviewView(view) {
@@ -4462,7 +4514,61 @@ function activate(context) {
     vscode.window.showInformationMessage('已重置 DSH 会话映射：下次提问将创建新的 DSH 会话。');
   });
 
-  context.subscriptions.push(viewSub, openInTabCmd, refreshCmd, openBrowserCmd, restartCmd, wsSub, sendSelectionCmd, chatStatusCmd, diagnoseModelsCmd, resetChatCmd);
+  // 编辑器右上角按钮：在右侧打开 DSH 面板（类似 Claude Code / Codex）
+  const openInSidebarCmd = vscode.commands.registerCommand('dshPanel.openInSidebar', async () => {
+    if (activeTab) {
+      activeTab.reveal();
+      return;
+    }
+    // 强制在右侧列打开，与 Claude Code 行为一致
+    const panel = vscode.window.createWebviewPanel(
+      'dsh.tab',
+      'DeepSeek Harness',
+      vscode.ViewColumn.Two,
+      { enableScripts: true, retainContextWhenHidden: true }
+    );
+    activeTab = panel;
+    if (activeView) {
+      activeView.description = '在标签页中打开';
+      activeView.webview.html = buildSuspendedHtml();
+    }
+    let disposed = false;
+    const reloadRight = async () => {
+      if (disposed) return;
+      panel.webview.html = buildLoadingHtml();
+      try {
+        const r = await preparePanelHtml(true);
+        if (disposed) return;
+        panel.webview.html = r.ok ? r.html : buildErrorHtml(r.reason);
+      } catch (e) {
+        if (disposed) return;
+        console.error('[DeepSeek Harness] 右侧面板渲染失败：', e);
+        panel.webview.html = buildErrorHtml('右侧面板渲染失败：' + (e && e.message ? e.message : String(e)));
+      }
+    };
+    tabReloadFn = reloadRight;
+
+    const cfgSub = vscode.workspace.onDidChangeConfiguration((e) => {
+      if (disposed) return;
+      if (e.affectsConfiguration('dshPanel')) { reloadRight(); }
+      else if (e.affectsConfiguration('editor.fontSize')) {
+        panel.webview.postMessage({ type: 'dsh-font-scale', scale: getFontScale() });
+      }
+    });
+
+    panel.onDidDispose(() => {
+      disposed = true;
+      cfgSub.dispose();
+      if (activeTab === panel) activeTab = null;
+      if (tabReloadFn === reloadRight) tabReloadFn = null;
+      if (activeView) { render(activeView); }
+    });
+    panel.webview.onDidReceiveMessage((m) => handleWebviewMessage(m, panel.webview));
+
+    await reloadRight();
+  });
+
+  context.subscriptions.push(viewSub, openInTabCmd, refreshCmd, openBrowserCmd, restartCmd, wsSub, sendSelectionCmd, chatStatusCmd, diagnoseModelsCmd, resetChatCmd, openInSidebarCmd);
 }
 
 function deactivate() {
