@@ -1,0 +1,38 @@
+{
+  "name": "dsh-webview-clipboard",
+  "version": "0.3.0",
+  "description": "DeepSeek Harness 插件：DSH 页面被 VS Code webview（跨源 iframe）内嵌时的剪贴板兼容层——① 跨平台把 navigator.clipboard.writeText 经宿主中继写入客户端剪贴板（修复面板内「复制」按钮静默失效）；② 修复 macOS 上与 Electron 内嵌组合时 ⌘C/⌘V/⌘X 失效的问题（改用 execCommand 显式执行）。由 Deepseek-Harness-for-VS-Code 扩展内置分发。",
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "cordis",
+    "plugin",
+    "clipboard",
+    "webview",
+    "vscode"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "platform": "web"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

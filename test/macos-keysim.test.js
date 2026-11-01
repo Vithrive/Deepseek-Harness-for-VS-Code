@@ -75,7 +75,7 @@ console.log('[1] macOS · 可编辑元素（textarea）');
 {
   const sb = makeSandbox();
   ok(sb.state().enabled === true && sb.state().mac === true, '激活门命中（macOS+Electron+iframe）');
-  ok(sb.state().version === '0.2.1', '版本 0.2.1');
+  ok(sb.state().version === '0.3.0', '版本 0.3.0');
   let ev = makeEvent(textarea(), { key: 'c', metaKey: true });
   sb.keydown(ev);
   ok(ev.preventDefaultCount === 1 && sb.execCalls.includes('copy'), '⌘C → preventDefault + execCommand(copy)');

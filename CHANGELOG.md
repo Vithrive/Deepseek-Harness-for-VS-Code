@@ -2,6 +2,26 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。完整提交历史见 [GitHub](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/commits/main)。
 
+## 1.1.1 —— 修复面板内「复制」按钮无反应（Issue #28）
+
+**忠实窗口（面板）**
+
+- **根因**：面板把 DSH 以跨源 iframe 内嵌在 webview 中，VS Code 的 Electron 权限处理器只对 `requestingUrl` 以 `vscode-webview://` 开头的请求放行 `clipboard-read` / `clipboard-sanitized-write`（`src/vs/code/electron-main/app.ts` 的 `configureSession`；本机 1.134.0 打包产物逻辑相同）；iframe 来源是 `http://127.0.0.1:<port>`，`navigator.clipboard.writeText()` 因此被拒（`Write permission denied`）。iframe 的 `allow="clipboard-read; clipboard-write"` 只是 Permissions Policy 委派，管不到这层权限处理器（上游 microsoft/vscode#182642 仍 open）。
+- **静默原因**：DSH Web 前端（dsh 0.2.1-rc.4）的复制工具 `zo()` 只在 `navigator.clipboard.writeText` **不存在**时才回落 `textarea + execCommand('copy')`；`writeText()` 存在但被拒时直接 `return false`，复制按钮仅在成功时切 ✓——所以点击毫无反应。
+- **修复：宿主剪贴板中继**。内置插件 `dsh-webview-clipboard` 升级到 **0.3.0**：宿主握手（ack 带 `clipboard:true`）后包裹 `navigator.clipboard.writeText`，把文本经 `postMessage` → webview 中继 → 扩展宿主 `vscode.env.clipboard.writeText()` 写入，结果沿原路返回并 resolve/reject。
+  - 不受 Electron 权限处理器限制；Remote-WSL / Remote-SSH 下写入的正是客户端（Windows）剪贴板；
+  - 宿主通道失败（旧版扩展无此消息 / 4s 超时 / 宿主明确拒绝）时自动回落原生实现，不放大故障面；
+  - 仅在被 iframe 内嵌且宿主握手后接管；独立浏览器 / 其它宿主里行为完全不变；
+  - 覆盖 DSH 所有走 `navigator.clipboard.writeText` 的复制入口（回答、代码块、消息、JSON 树等）。
+- **插件改为真实文件分发**：`dsh-webview-clipboard` 源码移到 `dsh-plugins/dsh-webview-clipboard/`（与 file-links / open-external 一致），不再由扩展内模板字面量生成——消除正则反斜杠被模板转义的隐患，可单独语法检查。
+- 既有的 macOS `⌘C/⌘V/⌘X` 修复保持不变；配置沿用 `dshPanel.installClipboardPlugin`（默认 `true`）。
+
+**测试**
+
+- 新增 `clipboard-write` 测试套（36 项）：插件握手前后行为、copy 中继与 resolve、宿主 ok/失败/超时回落、`navigator.clipboard` 缺失与伪造 ack、webview 中继（ack 字段兼容、copy 转发、origin/source/字段校验、4 MiB 截断、结果回传）、宿主写入与回执（成功/失败/空/超长/缺字段/webview 缺失）。
+- 更新 `clipboard-plugin`（插件文件结构 + 中继协议断言，25 项）与 `macos-keysim`（版本 0.3.0）。
+- 全套 16 个测试套件通过（454 项断言 + 真实 dsh e2e）。
+
 ## 1.1.0 —— Remote-WSL / Remote-SSH 下用本机浏览器登录 DeepSeek 账号
 
 **忠实窗口（面板）**

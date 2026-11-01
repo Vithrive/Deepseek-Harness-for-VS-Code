@@ -13,6 +13,14 @@
 
 ## 🆕 最近版本新增功能
 
+### v1.1.1 —— 修复面板内「复制」按钮无反应（Issue #28，2026-11）
+
+- **根因（VS Code 层面）**：面板把 DSH 以跨源 iframe 内嵌在 webview 里，而 VS Code 的 Electron 权限处理器只对 `requestingUrl` 以 `vscode-webview://` 开头的请求放行 `clipboard-read` / `clipboard-sanitized-write`；iframe 的来源是 `http://127.0.0.1:<port>`，于是 `navigator.clipboard.writeText()` 被拒（`Write permission denied`）。iframe 上的 `allow="clipboard-read; clipboard-write"` 只做 Permissions Policy 委派，管不到这层权限处理器（上游 microsoft/vscode#182642 仍 open）。
+- **为什么「点了没反应」**：DSH 前端的复制工具只在 `navigator.clipboard.writeText` **不存在**时才回落 `textarea + execCommand('copy')`；`writeText()` 存在但被拒时直接返回 false，既不报错也不改图标，因此按钮完全静默。
+- **修复：宿主剪贴板中继**。内置插件 `dsh-webview-clipboard`（v0.3.0）在宿主握手后包裹 `navigator.clipboard.writeText`：文本经 webview 中继交给扩展宿主 `vscode.env.clipboard.writeText()` 写入——不受 Electron 权限处理器限制，**Remote-WSL / Remote-SSH 下写入的正是客户端（Windows）剪贴板**；结果沿原路返回，复制按钮恢复 ✓ 提示。宿主通道失败（旧版扩展 / 超时）时自动回落原生实现，未握手（独立浏览器）行为完全不变。
+- 同时保留既有的 macOS `⌘C/⌘V/⌘X` 修复；插件改为随扩展文件分发的真实文件（不再由模板字面量生成）。
+- 控制项沿用 `dshPanel.installClipboardPlugin`（默认 `true`）。
+
 ### v1.1.0 —— Remote-WSL / Remote-SSH 下登录 DeepSeek 账号（在本机浏览器打开授权页，2026-10）
 
 - **修复：远端窗口里点「登录」没有反应**。DSH 的账号登录由页面内的 `BrowserLogin` 驱动：先 `window.open('about:blank')` 预开一个标签页，拿到授权链接后再把该页导航过去。但面板把 DSH 以跨源 iframe 内嵌进 VS Code webview，webview **不允许新开窗口**（`window.open` 返回 null），而 WSL / Remote-SSH 的远端又没有图形浏览器可以兜底——登录流程因此卡在「没有自动打开新页面？」。
@@ -114,7 +122,7 @@
 | `dshPanel.remoteAuthProxy` | `true` | Remote-SSH / Dev Containers 下是否启用受管认证代理（v1.0.2 起默认启用）。共享服务器请评估：代理只监听服务器回环，但同机他人枚举到该端口可能借它访问你的 DSH |
 | `dshPanel.killOnDispose` | `true` | 扩展停用时是否结束它启动的 dsh |
 | `dshPanel.openSystemBrowser` | `false` | 扩展启动 dsh 时是否保留弹系统浏览器的旧行为 |
-| `dshPanel.installClipboardPlugin` | `true` | 自动安装内置 `dsh-webview-clipboard` 插件（修复 macOS 面板内编辑快捷键；Windows/Linux 上为惰性文件不影响行为）。怀疑影响 dsh web 启动时可关闭对比 |
+| `dshPanel.installClipboardPlugin` | `true` | 自动安装内置 `dsh-webview-clipboard` 插件（v0.3.0 起：跨平台把面板内 `navigator.clipboard.writeText` 经宿主中继写入剪贴板，修复复制按钮静默失效；并修复 macOS 面板内编辑快捷键）。怀疑影响 dsh web 启动时可关闭对比 |
 | `dshPanel.installOpenExternalPlugin` | `true` | 自动安装内置 `dsh-vscode-open-external` 插件（v1.1.0 起）：面板内 `window.open`（典型：DeepSeek 账号登录授权页）改在本机系统浏览器打开——Remote-WSL / Remote-SSH 下由你的 Windows 浏览器打开 |
 | `dshPanel.workspaceFileLinkAction` | `revealAndOpen` | 对话里工作区文件/文件夹链接的点击行为：`revealAndOpen` 资源管理器定位并打开 / `revealOnly` 仅定位 / `off` 不接管（保持 DSH 侧边栏打开，也不安装配套插件） |
 
@@ -282,7 +290,7 @@ DSH：用自己的一套 harness（记忆 / 技能 / AGENTS.md / 工具 / agent 
 
 ## 🌱 版本状态声明
 
-**1.0.0 起为正式版本；1.0.1 增加官网 Windows 桌面版支持；1.0.2 支持 Remote-SSH / Dev Containers；1.1.0 支持在远端面板里用本机浏览器完成 DeepSeek 账号登录**：忠实窗口（面板）与 Copilot 桥接两条能力线都已长期自用 + 回归测试覆盖，功能完整可用：
+**1.0.0 起为正式版本；1.0.1 增加官网 Windows 桌面版支持；1.0.2 支持 Remote-SSH / Dev Containers；1.1.0 支持在远端面板里用本机浏览器完成 DeepSeek 账号登录；1.1.1 修复面板内复制按钮（宿主剪贴板中继）**：忠实窗口（面板）与 Copilot 桥接两条能力线都已长期自用 + 回归测试覆盖，功能完整可用：
 
 - 两条能力线：**忠实窗口**（把 DSH Web GUI 原样内嵌到侧边栏 / 编辑器标签页）与 **Copilot 桥接**（把 DSH 注册为 VS Code 聊天模型）——桥接仍在持续跟进 DeepSeek 模型与 dsh 版本演进，遇到不一致会在扩展内明确告警而不是静默降级；
 - 欢迎大家在不同操作系统（Windows / macOS / Linux，以及 Remote-SSH、WSL、Dev Containers 等远程场景）中测试使用；

@@ -77,6 +77,15 @@ console.log('[6b] cordis.patch.yml 结构');
 ok(/-\s*insert:/.test(files['cordis.patch.yml']), 'insert 行存在');
 ok(files['cordis.patch.yml'].includes("name: '" + CLIPBOARD_PLUGIN_NAME + "'"), 'name 与包名一致');
 
+console.log('[7] 剪贴板写中继（v0.3.0，Issue #28）');
+ok(files['lib/client.js'].includes('navigator.clipboard') && files['lib/client.js'].includes('writeText'), '包裹 navigator.clipboard.writeText');
+ok(files['lib/client.js'].includes("type: 'copy'") && files['lib/client.js'].includes('clipboard-result'), 'copy 请求 / clipboard-result 回执协议存在');
+ok(files['lib/client.js'].includes("type: 'hello'") && files['lib/client.js'].includes('HOST_ID'), '与宿主握手（hello / HOST_ID）');
+ok(files['lib/client.js'].includes('acked'), '仅在宿主 ack 后接管（独立浏览器行为不变）');
+ok(files['lib/client.js'].includes('relayWriteText') && files['lib/client.js'].includes('removeWritePatch'), '提供中继与卸载还原');
+ok(JSON.parse(files['package.json']).version === '0.3.0', '插件版本 0.3.0');
+ok(files['lib/index.js'].includes("export const name = '" + CLIPBOARD_PLUGIN_NAME + "'"), '宿主半身导出 name 与包名一致');
+
 fs.rmSync(base, { recursive: true, force: true });
 console.log('\n全部通过：' + passed + ' 项断言 ✓');
 process.exit(0);

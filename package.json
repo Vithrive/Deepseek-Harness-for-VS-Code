@@ -1,8 +1,8 @@
 {
   "name": "deepseek-harness-vscode",
   "displayName": "DeepSeek Harness for VSCode",
-  "description": "DeepSeek Harness (DSH) 的 VS Code 接入：侧边栏/标签页忠实呈现 DSH Web GUI 并自动检测启动，不影响用户对 DSH 本身的页面组织、第三方插件装配等二次开发行为；v0.7.13 起把 DSH 注册为 Copilot 聊天模型——模型选择器里出现 DeepSeek Harness 下属模型条目，接收 Copilot 组织好的现成对话、滤除对话内容无关的 prompt、交给 DSH 二次组织、流式回写，旨在利用 DSH 强大的任务编排与工具调用能力，发挥最大性能；v1.0.1 起自动识别官网 Windows 桌面版，用其内置 dsh CLI 启动（无需 npm/Node）；v1.1.0 起在 Remote-WSL / Remote-SSH 面板里用本机浏览器完成 DeepSeek 账号登录",
-  "version": "1.1.0",
+  "description": "DeepSeek Harness (DSH) 的 VS Code 接入：侧边栏/标签页忠实呈现 DSH Web GUI 并自动检测启动，不影响用户对 DSH 本身的页面组织、第三方插件装配等二次开发行为；v0.7.13 起把 DSH 注册为 Copilot 聊天模型——模型选择器里出现 DeepSeek Harness 下属模型条目，接收 Copilot 组织好的现成对话、滤除对话内容无关的 prompt、交给 DSH 二次组织、流式回写，旨在利用 DSH 强大的任务编排与工具调用能力，发挥最大性能；v1.0.1 起自动识别官网 Windows 桌面版，用其内置 dsh CLI 启动（无需 npm/Node）；v1.1.0 起在 Remote-WSL / Remote-SSH 面板里用本机浏览器完成 DeepSeek 账号登录；v1.1.1 起面板内复制按钮经宿主剪贴板中继恢复可用",
+  "version": "1.1.1",
   "publisher": "vithrive",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -69,7 +69,7 @@
         "dshPanel.installClipboardPlugin": {
           "type": "boolean",
           "default": true,
-          "description": "自动安装内置 dsh-webview-clipboard 插件（修复 macOS 面板内复制/粘贴等编辑快捷键失效；Windows/Linux 上为惰性文件不影响行为）。若怀疑影响 dsh web 启动可关闭后对比"
+          "description": "自动安装内置 dsh-webview-clipboard 插件（v0.3.0 起：跨平台把面板内 navigator.clipboard.writeText 经宿主中继写入剪贴板，修复复制按钮静默失效；并修复 macOS 面板内复制/粘贴等编辑快捷键失效）。若怀疑影响 dsh web 启动可关闭后对比"
         },
         "dshPanel.installOpenExternalPlugin": {
           "type": "boolean",

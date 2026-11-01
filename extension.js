@@ -1757,6 +1757,7 @@ function buildIframeHtml(url, scale, requestedFileLinkMode) {
   var HOST_ID = ${jsonForScript(VSCODE_HOST_ID)};
   var PLUGIN_ID = ${jsonForScript(FILE_LINK_PLUGIN_SOURCE)};
   var OPEN_PLUGIN_ID = ${jsonForScript(OPEN_EXTERNAL_PLUGIN_SOURCE)};
+  var CLIPBOARD_PLUGIN_ID = ${jsonForScript(CLIPBOARD_PLUGIN_SOURCE)};
   var FRAME_ORIGIN = ${jsonForScript(origin)};
   var fileLinkMode = ${jsonForScript(fileLinkMode)};
   function frameWindow() {
@@ -1775,13 +1776,15 @@ function buildIframeHtml(url, scale, requestedFileLinkMode) {
     try { w.postMessage(payload, FRAME_ORIGIN); } catch (e) { /* 页面正在切换：忽略 */ }
   }
   /** 握手回执：插件据此确认「外层是本 VS Code 面板」。fileLinks=false 表示不接管
-   *  文件链接（插件保持惰性），openExternal=true 表示可以转交外链/登录链接。 */
+   *  文件链接（插件保持惰性），openExternal=true 表示可以转交外链/登录链接，
+   *  clipboard=true 表示可以把剪贴板写操作中继给宿主。 */
   function ackFrame() {
     postToFrame({
       source: HOST_ID,
       type: 'ack',
       fileLinks: fileLinkMode !== 'off',
       openExternal: true,
+      clipboard: true,
       mode: fileLinkMode
     });
   }
@@ -1837,9 +1840,31 @@ function buildIframeHtml(url, scale, requestedFileLinkMode) {
       }
       return;
     }
+    if (data.source === CLIPBOARD_PLUGIN_ID) {
+      // 剪贴板兼容插件：面板 iframe 的异步 Clipboard API 被 Electron 权限处理器拒绝
+      // （microsoft/vscode#182642），由插件把 writeText 的文本转交宿主写入剪贴板。
+      if (!fromOurFrame(event)) return;
+      if (data.type === 'hello') {
+        ackFrame();
+        return;
+      }
+      if (data.type === 'copy' && typeof data.token === 'string' && typeof data.text === 'string') {
+        vscode.postMessage({
+          type: 'dsh-clipboard-write',
+          token: data.token.slice(0, 64),
+          text: data.text.slice(0, 4 * 1024 * 1024)
+        });
+      }
+      return;
+    }
     if (data.type === 'dsh-reveal-result' && typeof data.token === 'string') {
       // 扩展宿主的处理结果：转发回 DSH 页面，由插件决定是否回放原始点击。
       postToFrame({ source: HOST_ID, type: 'reveal-result', token: data.token, ok: data.ok === true });
+      return;
+    }
+    if (data.type === 'dsh-clipboard-result' && typeof data.token === 'string') {
+      // 扩展宿主的剪贴板写入结果：转发回 DSH 页面，由插件 resolve/reject 复制 Promise。
+      postToFrame({ source: HOST_ID, type: 'clipboard-result', token: data.token, ok: data.ok === true });
       return;
     }
     if (data.type === 'dsh-font-scale' && typeof data.scale === 'number') {
@@ -1895,10 +1920,11 @@ function escapeHtml(s) {
 const DSH_PLUGIN_NAME = 'dsh-drop-caret';
 const DSH_PLUGIN_MIN = '0.2.3';
 const NPMJS_REGISTRY = 'https://registry.npmjs.org/';
-// 内置分发的兼容插件（随扩展文件直接写入 DSH web profile，不经 npm）：
-// 修复 macOS 上 DSH 页面被本扩展以跨源 iframe 内嵌时 ⌘C/⌘V/⌘X 失效的问题。
+// 内置分发的兼容插件（源码在 dsh-plugins/ 目录，随扩展文件直接写入 DSH web profile，
+// 不经 npm）：① macOS 上 DSH 页面被跨源 iframe 内嵌时 ⌘C/⌘V/⌘X 失效；
+// ② 跨平台：面板内 navigator.clipboard.writeText 被 Electron 权限处理器拒绝，
+// 复制按钮静默失效——插件把写操作经宿主 vscode.env.clipboard.writeText 中继。
 const CLIPBOARD_PLUGIN_NAME = 'dsh-webview-clipboard';
-const CLIPBOARD_PLUGIN_VERSION = '0.2.1';
 // 内置分发的工作区文件链接插件（源码在 dsh-plugins/ 目录，随扩展文件直接写入
 // DSH web profile，不经 npm）：点对话里的工作区文件/文件夹链接时，改为在本窗口的
 // VS Code 资源管理器中定位并打开。
@@ -1914,6 +1940,7 @@ const BUNDLED_PLUGINS_DIR = 'dsh-plugins';
 const VSCODE_HOST_ID = 'dsh-vscode-host';
 const FILE_LINK_PLUGIN_SOURCE = 'dsh-vscode-file-links';
 const OPEN_EXTERNAL_PLUGIN_SOURCE = 'dsh-vscode-open-external';
+const CLIPBOARD_PLUGIN_SOURCE = 'dsh-webview-clipboard';
 // 文件链接点击行为：资源管理器定位 + 打开文件 / 仅定位 / 不接管（保持 DSH 行为）。
 const FILE_LINK_ACTION_KEY = 'dshPanel.workspaceFileLinkAction';
 const FILE_LINK_ACTIONS = ['revealAndOpen', 'revealOnly', 'off'];
@@ -2054,155 +2081,47 @@ function tryDshPluginAdd(plugin) {
 }
 
 /**
- * 生成内置兼容插件 dsh-webview-clipboard 的全部文件内容。
+ * 读取随扩展分发的内置插件文件（相对路径 → 内容）。
+ * 插件源码以真实文件形式放在 dsh-plugins/ 目录里（而非扩展内的模板字面量），
+ * 避免正则反斜杠被模板转义折叠这类问题，也让插件可以单独语法检查。
+ * @param {string} name 插件包名（= dsh-plugins/ 下的目录名）
+ * @returns {Record<string, string>} 相对路径 → 文件内容
+ */
+function readBundledPluginFiles(name) {
+  const base = path.join(__dirname, BUNDLED_PLUGINS_DIR, name);
+  const rels = ['package.json', 'cordis.patch.yml', 'lib/index.js', 'lib/client.js'];
+  const files = {};
+  for (const rel of rels) {
+    files[rel] = fs.readFileSync(path.join(base, rel), 'utf8');
+  }
+  return files;
+}
+
+/**
+ * 内置剪贴板兼容插件 dsh-webview-clipboard 的文件清单（相对路径 → 内容）。
  *
- * 问题（macOS）：DSH 页面以跨源 iframe 内嵌在 VS Code webview 中时，
- * ⌘C/⌘V/⌘X 按键虽能到达页面，但浏览器的原生剪贴板默认动作在这条
- * 链路上不会发生，复制/粘贴/剪切全部失效（Windows 正常）。
- *
- * 修复：插件在 DSH 页面内拦截这三个键，preventDefault 后改用
- * document.execCommand('copy'/'paste'/'cut') 显式执行。其余编辑快捷键
- * （⌘A/撤销重做/光标移动/删除）原生可用，不做处理。
- * 仅在「被 Electron 内嵌 + macOS」时启用，其余环境行为不变。
+ * 职责（v0.3.0 起）：
+ * 1. **跨平台剪贴板写中继**：面板内 DSH 页面（跨源 iframe）的
+ *    navigator.clipboard.writeText 被 Electron 权限处理器拒绝（只对
+ *    vscode-webview:// 来源放行 clipboard-*，见 microsoft/vscode#182642），而 DSH
+ *    前端的复制工具在被拒时静默返回 false → 复制按钮毫无反应。插件在宿主握手后
+ *    把 writeText 经 webview 中继交给扩展宿主的 vscode.env.clipboard.writeText
+ *    写入（Remote-WSL / Remote-SSH 下即客户端剪贴板），结果沿原路返回。
+ * 2. **macOS 快捷键修复**（v0.2.x 既有）：与 Electron 内嵌组合时 ⌘C/⌘V/⌘X 失效，
+ *    改用 document.execCommand 显式执行。
  * @returns {Record<string, string>} 相对路径 → 文件内容
  */
 function clipboardPluginFiles() {
-  const pkgJson = JSON.stringify({
-    name: CLIPBOARD_PLUGIN_NAME,
-    version: CLIPBOARD_PLUGIN_VERSION,
-    description: 'DeepSeek Harness 插件：DSH 页面被 VS Code webview（跨源 iframe）内嵌时，修复 macOS 上 ⌘C/⌘V/⌘X 快捷键失效的问题（改用 execCommand 显式执行）。由 Deepseek-Harness-for-VS-Code 扩展内置分发。',
-    keywords: ['deepseek', 'harness', 'dsh', 'cordis', 'plugin', 'clipboard', 'webview', 'vscode'],
-    type: 'module',
-    main: 'lib/index.js',
-    exports: {
-      '.': './lib/index.js',
-      './client': './lib/client.js',
-      './package.json': './package.json'
-    },
-    files: ['lib', 'cordis.patch.yml'],
-    license: 'MIT',
-    dsh: {
-      client: {
-        inject: ['@deepseek-ai/dsh-client-runtime'],
-        platform: 'web'
-      },
-      bundle: {
-        patch: './cordis.patch.yml'
-      }
-    }
-  }, null, 2) + '\n';
+  return readBundledPluginFiles(CLIPBOARD_PLUGIN_NAME);
+}
 
-  const patchYml = [
-    '# dsh-webview-clipboard bundle patch: one insert registering the dual-face plugin.',
-    "# The row name must match the npm package name and the host half's exported `name`.",
-    '- insert:',
-    '    - id: webview-clipboard',
-    `      name: '${CLIPBOARD_PLUGIN_NAME}'`,
-    ''
-  ].join('\n');
-
-  const indexJs = `// ${CLIPBOARD_PLUGIN_NAME} host half: no-op.
-// 本插件只做客户端（浏览器侧）兼容：修复 DSH 页面被 VS Code webview 内嵌时
-// macOS 上复制/粘贴等剪贴板编辑命令失效的问题。宿主侧无需任何逻辑。
-export const name = '${CLIPBOARD_PLUGIN_NAME}'
-
-export const inject = []
-
-export function apply(_ctx) {}
-`;
-
-  // 注意：本文件内容嵌在扩展的模板字面量里，正则里的反斜杠须写成 \\\\，
-  // 否则模板字面量会把 \\/ 折叠成 / 造成注入脚本语法错误（同 buildIframeHtml 的前车之鉴）。
-  const clientJs = `// ${CLIPBOARD_PLUGIN_NAME} client bundle (ModuleLoader format)
-//
-// macOS + VS Code webview：DSH 页面以跨源 iframe 内嵌时，⌘C/⌘V/⌘X 的
-// 原生剪贴板默认动作不会发生，复制/粘贴/剪切失效（Windows 正常）。
-// 修复：拦截这三个键，preventDefault 后改用 document.execCommand 显式执行。
-// 其余编辑快捷键原生可用，不做处理，避免与编辑器自身实现冲突。
-// 仅在「被 Electron 内嵌 + macOS」时启用，其余环境行为不变。
-
-window.__ModuleLoader__.load({ id: '${CLIPBOARD_PLUGIN_NAME}', factory: (require) => {
-  var module = { exports: {} }
-  var exports = module.exports
-
-  var PLUGIN_VERSION = '${CLIPBOARD_PLUGIN_VERSION}'
-
-  function inIframe() {
-    try { return window.parent !== window } catch (e) { return false }
+/** 内置剪贴板兼容插件的版本（以插件自己的 package.json 为单一源头）。 */
+function clipboardPluginVersion() {
+  try {
+    return JSON.parse(clipboardPluginFiles()['package.json']).version || '0.0.0';
+  } catch {
+    return '0.0.0';
   }
-
-  function isMac() {
-    var ua = navigator.userAgent || ''
-    if (/Macintosh|Mac OS X/i.test(ua)) return true
-    if (typeof navigator.platform === 'string' && /Mac/i.test(navigator.platform)) return true
-    try {
-      if (navigator.userAgentData && navigator.userAgentData.platform === 'macOS') return true
-    } catch (e) { /* ignore */ }
-    return false
-  }
-
-  function inElectron() {
-    return /Electron\\//.test(navigator.userAgent || '')
-  }
-
-  /** 是否启用兼容层。 */
-  function enabled() {
-    return inIframe() && isMac() && inElectron()
-  }
-
-  /** 事件目标是否为可编辑元素（paste 只对它们有意义）。 */
-  function isEditable(el) {
-    if (!el || el.nodeType !== 1) return false
-    var tag = el.tagName
-    if (tag === 'TEXTAREA' || tag === 'INPUT') return true
-    return el.isContentEditable === true
-  }
-
-  function onKeyDown(e) {
-    if (e.defaultPrevented) return                 // 页面自身已处理，尊重之
-    if (!enabled()) return
-    if (e.isComposing || e.keyCode === 229) return // IME 组合中不干预
-    var mod = e.metaKey || e.ctrlKey
-    if (!mod || e.altKey || e.shiftKey) return     // 仅裸 ⌘/Ctrl + 字母
-    var lower = String(e.key || '').toLowerCase()
-    var cmd = null
-    if (lower === 'v') cmd = 'paste'
-    else if (lower === 'c') cmd = 'copy'
-    else if (lower === 'x') cmd = 'cut'
-    if (!cmd) return
-    if (cmd === 'paste' && !isEditable(e.target)) return
-    e.preventDefault()
-    try {
-      var ok = document.execCommand(cmd)
-      if (!ok) console.warn('[${CLIPBOARD_PLUGIN_NAME}] execCommand("' + cmd + '") returned false')
-    } catch (err) {
-      console.warn('[${CLIPBOARD_PLUGIN_NAME}] execCommand("' + cmd + '") failed:', err)
-    }
-  }
-
-  function apply() {
-    window.addEventListener('keydown', onKeyDown, false)
-    window.__dshWebviewClipboard = {
-      version: PLUGIN_VERSION,
-      enabled: enabled(),
-      mac: isMac(),
-      electron: inElectron()
-    }
-  }
-
-  exports.apply = apply
-  exports.inject = []
-  return module.exports
-} })
-
-`;
-
-  return {
-    'package.json': pkgJson,
-    'cordis.patch.yml': patchYml,
-    'lib/index.js': indexJs,
-    'lib/client.js': clientJs
-  };
 }
 
 /**
@@ -2211,8 +2130,9 @@ window.__ModuleLoader__.load({ id: '${CLIPBOARD_PLUGIN_NAME}', factory: (require
  */
 async function ensureClipboardPlugin(profileDir) {
   try {
+    const version = clipboardPluginVersion();
     const installed = await installedPluginVersion(profileDir, CLIPBOARD_PLUGIN_NAME);
-    if (installed === CLIPBOARD_PLUGIN_VERSION) {
+    if (installed === version) {
       await ensureProfileDeclaration(profileDir, CLIPBOARD_PLUGIN_NAME, null);
       return false; // 版本一致，无需写入
     }
@@ -2499,6 +2419,43 @@ function replyRevealResult(webview, token, ok) {
   }
 }
 
+/** 单次中继的剪贴板文本上限（与 webview 中继、页面插件保持一致）。 */
+const CLIPBOARD_TEXT_MAX = 4 * 1024 * 1024;
+
+/**
+ * 把面板内复制操作中继到 VS Code 剪贴板，并回执给 webview。
+ * 面板 iframe 的异步 Clipboard API 被 Electron 权限处理器拒绝，扩展宿主的
+ * vscode.env.clipboard 不受该限制；Remote-WSL / Remote-SSH 下写入的正是客户端剪贴板。
+ * @param {any} [webview]
+ * @param {string} token 页面插件生成的请求标识
+ * @param {string} text 待写入文本
+ */
+function replyClipboardResult(webview, token, text) {
+  const safeToken = String(token || '').slice(0, 64);
+  const reply = (ok) => {
+    if (!webview || typeof webview.postMessage !== 'function') return;
+    try {
+      webview.postMessage({ type: 'dsh-clipboard-result', token: safeToken, ok: ok === true });
+    } catch {
+      // webview 已销毁：忽略
+    }
+  };
+  const value = typeof text === 'string' ? text : '';
+  if (safeToken === '' || value.length === 0 || value.length > CLIPBOARD_TEXT_MAX) {
+    reply(false);
+    return;
+  }
+  const clipboard = vscode.env && vscode.env.clipboard;
+  if (!clipboard || typeof clipboard.writeText !== 'function') {
+    reply(false);
+    return;
+  }
+  Promise.resolve(clipboard.writeText(value)).then(
+    () => reply(true),
+    () => reply(false)
+  );
+}
+
 /**
  * 处理「DSH 对话里点击工作区文件/文件夹链接」：在当前窗口的 VS Code 资源管理器中
  * 定位并打开，再把结果回执给 webview。
@@ -2533,8 +2490,8 @@ async function revealWorkspaceTarget(msg, webview) {
 
 /**
  * 处理 webview 消息：DSH 页面内点击外部链接用系统浏览器打开；点击工作区文件链接在
- * VS Code 资源管理器中定位并打开；发送选中内容回执提示。
- * 侧边栏面板与编辑器标签页共用。
+ * VS Code 资源管理器中定位并打开；写入剪贴板（面板内复制按钮的宿主中继）；发送选中
+ * 内容回执提示。侧边栏面板与编辑器标签页共用。
  * @param {any} msg
  * @param {any} [webview] 发起消息的 webview（用于回执；老调用点可省略）
  */
@@ -2544,6 +2501,12 @@ function handleWebviewMessage(msg, webview) {
     if (/^https?:\/\//i.test(u)) {
       vscode.env.openExternal(vscode.Uri.parse(u));
     }
+  } else if (msg && msg.type === 'dsh-clipboard-write' && typeof msg.token === 'string' && typeof msg.text === 'string') {
+    // 面板 iframe 的异步 Clipboard API 被 Electron 权限处理器拒绝（只对
+    // vscode-webview:// 来源放行 clipboard-*，见 microsoft/vscode#182642），
+    // 由页面内插件把 writeText 的文本中继到这里，用扩展 API 写入剪贴板
+    // （Remote-WSL / Remote-SSH 下写入的正是客户端剪贴板）。
+    replyClipboardResult(webview, msg.token, msg.text);
   } else if (msg && msg.type === 'dsh-reveal-path') {
     const token = typeof msg.token === 'string' ? msg.token.slice(0, 64) : '';
     revealWorkspaceTarget(msg, webview).catch(() => replyRevealResult(webview, token, false));
@@ -4492,7 +4455,10 @@ module.exports.__internals = {
   normAuthority,
   startDshAndWaitReady,
   clipboardPluginFiles,
+  clipboardPluginVersion,
+  ensureClipboardPlugin,
   CLIPBOARD_PLUGIN_NAME,
+  CLIPBOARD_PLUGIN_SOURCE,
   fileLinkPluginFiles,
   fileLinkPluginVersion,
   ensureFileLinkPlugin,
