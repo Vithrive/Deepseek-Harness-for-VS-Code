@@ -213,6 +213,46 @@ function parseRegInstallLocations(stdout) {
 }
 
 /**
+ * 从 `reg query … /f "DeepSeek Harness" /d` 的输出里取出命中的卸载项键路径。
+ *
+ * 为什么要单独取键：`/d` 只打印「值内容里包含搜索词」的那些值，
+ * 因此安装到自定义目录（例如 `C:\A D\A 应用区\deepseek`）时，注册表里
+ * 明明有 InstallLocation，却因为它的值不含 "DeepSeek Harness" 而不会出现在
+ * 输出里——只按 InstallLocation 解析就会误判「未安装桌面版」。
+ * 命中键之后再用不带 /f 的 query 读一次完整值表，才拿得到真实的安装目录。
+ * @param {string} stdout
+ * @returns {string[]} 形如 `HKEY_CURRENT_USER\...\Uninstall\{GUID}` 的键路径
+ */
+function parseRegKeys(stdout) {
+  const keys = [];
+  for (const line of String(stdout || '').split(/\r?\n/)) {
+    const key = line.trim();
+    if (/^HKEY_/i.test(key)) keys.push(key);
+  }
+  return keys;
+}
+
+/**
+ * 从一条卸载项的完整值表里推断安装目录。
+ * 优先 InstallLocation；缺失时退回 DisplayIcon（桌面版写法为
+ * `<安装目录>\DeepSeek Harness.exe,0`），因为个别安装器只写 DisplayIcon。
+ * @param {string} stdout
+ * @returns {string[]}
+ */
+function parseInstallDirFromEntry(stdout) {
+  const locations = parseRegInstallLocations(stdout);
+  if (locations.length) return locations;
+  const dirs = [];
+  for (const line of String(stdout || '').split(/\r?\n/)) {
+    const m = /^\s*DisplayIcon\s+REG_(?:SZ|EXPAND_SZ)\s+(.+?)\s*$/i.exec(line);
+    if (!m) continue;
+    const icon = m[1].replace(/,-?\d+$/, '').replace(/^"|"$/g, '');
+    if (/\.exe$/i.test(icon)) dirs.push(path.dirname(icon));
+  }
+  return dirs;
+}
+
+/**
  * 从候选安装目录里挑出第一个带桌面版内置 CLI 的（纯函数，便于测试）。
  * @param {string[]} dirs 候选安装目录
  * @param {(p: string) => boolean} [exists] 存在性判断（测试注入）
@@ -233,14 +273,20 @@ function pickDesktopCli(dirs, exists = fs.existsSync) {
 
 /**
  * 探测官网 Windows 桌面版的内置 CLI。
- * 安装位置来源：1) 注册表卸载项的 InstallLocation（覆盖自定义安装盘/目录，
- * 桌面版按用户安装写 HKCU，同时兼容 HKLM 的机器级安装）；2) 常见默认目录兜底。
+ * 安装位置来源：1) 注册表卸载项（覆盖自定义安装盘/目录，桌面版按用户安装写 HKCU，
+ * 同时兼容 HKLM 的机器级安装）；2) 常见默认目录兜底。
+ * @param {{run?: (cmd: string, args: string[], timeoutMs: number) => Promise<string>, exists?: (p: string) => boolean}} [opts]
+ *   测试注入口：run 替换命令执行，exists 替换存在性判断。
  * @returns {Promise<{cmd: string, installDir: string} | null>}
  */
-async function probeDesktopDshCli() {
+async function probeDesktopDshCli(opts) {
   if (process.platform !== 'win32') return null;
+  const run = (opts && opts.run) || runCommandOutput;
+  const exists = (opts && opts.exists) || fs.existsSync;
   const dirs = [];
   // 1) 注册表。/f … /d 按「数据」搜，卸载项 DisplayName 为 "DeepSeek Harness <版本>"。
+  //    注意 /d 只输出「值内容含搜索词」的值，自定义安装目录下 InstallLocation 会被漏掉，
+  //    所以对每个命中的键再读一次完整值表。
   const keys = [
     'HKCU\\' + DESKTOP_UNINSTALL_KEY,
     'HKLM\\' + DESKTOP_UNINSTALL_KEY,
@@ -248,8 +294,14 @@ async function probeDesktopDshCli() {
   ];
   for (const key of keys) {
     try {
-      const out = await runCommandOutput('reg', ['query', key, '/s', '/f', '"DeepSeek Harness"', '/d'], 8000);
+      const out = await run('reg', ['query', key, '/s', '/f', '"DeepSeek Harness"', '/d'], 8000);
       dirs.push(...parseRegInstallLocations(out));
+      for (const matched of parseRegKeys(out)) {
+        try {
+          const full = await run('reg', ['query', '"' + matched + '"'], 8000);
+          dirs.push(...parseInstallDirFromEntry(full));
+        } catch (_) { /* 单个键读不到：继续，靠默认目录兜底 */ }
+      }
     } catch (_) { /* 该 hive 无匹配项或无权限：继续 */ }
   }
   // 2) 默认安装目录兜底（注册表被清理、安装器路径变体等）。
@@ -257,7 +309,7 @@ async function probeDesktopDshCli() {
   dirs.push(path.join(localAppData, 'Programs', 'DeepSeek Harness'));
   dirs.push(path.join(process.env.ProgramFiles || 'C:\\Program Files', 'DeepSeek Harness'));
   dirs.push(path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'DeepSeek Harness'));
-  return pickDesktopCli(dirs);
+  return pickDesktopCli(dirs, exists);
 }
 
 /** 定位桌面版内置 CLI（带缓存，避免面板每次刷新都查注册表）。 */
@@ -4492,6 +4544,8 @@ module.exports.__internals = {
   getDshCommand,
   shellCommandText,
   parseRegInstallLocations,
+  parseRegKeys,
+  parseInstallDirFromEntry,
   pickDesktopCli,
   probeDesktopDshCli,
   findDesktopDshCli,
