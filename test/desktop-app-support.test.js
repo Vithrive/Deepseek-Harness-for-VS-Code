@@ -105,6 +105,56 @@ const I = ext.__internals;
     ok(I.parseRegInstallLocations(null).length === 0, 'null 输出返回空数组');
   }
 
+  console.log('[2b] 自定义安装目录：/d 过滤会漏掉 InstallLocation');
+  {
+    // 真实机器抓到的输出：桌面版装在 C:\A D\A 应用区\deepseek。
+    // reg 的 /d 只打印「值内容含搜索词」的值，InstallLocation 因此整行缺席，
+    // 旧实现据此断定「没装桌面版」，面板停在「未检测到 DeepSeek Harness」。
+    const filtered = [
+      '',
+      'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\1bf39983-50d0-5fe0-9ef4-cece76f67c5e',
+      '    DisplayName    REG_SZ    DeepSeek Harness 0.2.1-rc.5',
+      '    UninstallString    REG_SZ    "C:\\A D\\A 应用区\\deepseek\\Uninstall DeepSeek Harness.exe" /currentuser',
+      '    DisplayIcon    REG_SZ    C:\\A D\\A 应用区\\deepseek\\DeepSeek Harness.exe,0',
+      '',
+      'End of search: 4 match(es) found.',
+      ''
+    ].join('\r\n');
+    ok(I.parseRegInstallLocations(filtered).length === 0, '（回归前提）/d 输出里确实没有 InstallLocation');
+    const keys = I.parseRegKeys(filtered);
+    ok(keys.length === 1 && /Uninstall\\1bf39983/.test(keys[0]), '命中键仍能从输出里取到');
+
+    const full = [
+      '',
+      'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\1bf39983-50d0-5fe0-9ef4-cece76f67c5e',
+      '    DisplayName    REG_SZ    DeepSeek Harness 0.2.1-rc.5',
+      '    InstallLocation    REG_SZ    C:\\A D\\A 应用区\\deepseek',
+      '    DisplayIcon    REG_SZ    C:\\A D\\A 应用区\\deepseek\\DeepSeek Harness.exe,0',
+      ''
+    ].join('\r\n');
+    ok(I.parseInstallDirFromEntry(full)[0] === 'C:\\A D\\A 应用区\\deepseek', '完整值表里能解析出中文自定义目录');
+
+    const iconOnly = '    DisplayIcon    REG_SZ    D:\\Apps\\Harness\\DeepSeek Harness.exe,0';
+    ok(I.parseInstallDirFromEntry(iconOnly)[0] === 'D:\\Apps\\Harness', '缺 InstallLocation 时退回 DisplayIcon 目录');
+
+    if (process.platform === 'win32') {
+      const cliPath = path.join('C:\\A D\\A 应用区\\deepseek', 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd');
+      const calls = [];
+      const found = await I.probeDesktopDshCli({
+        run: async (cmd, args) => {
+          calls.push(args.join(' '));
+          return args.join(' ').includes('/f') ? filtered : full;
+        },
+        exists: (p) => p === cliPath
+      });
+      ok(calls.some((c) => c.includes('/f')), '先用 /d 搜索定位命中键');
+      ok(calls.some((c) => !c.includes('/f') && c.includes('HKEY_CURRENT_USER')), '再对命中键读一次完整值表');
+      ok(found && found.installDir === 'C:\\A D\\A 应用区\\deepseek', '第二遍读取让自定义安装目录被识别');
+    } else {
+      ok(true, '非 win32：跳过注册表路径断言');
+    }
+  }
+
   console.log('[3] shellCommandText：含空格路径的 cmd.exe 引号');
   {
     // 造一个「父目录带空格 + 文件存在」的真实路径
@@ -183,6 +233,8 @@ const I = ext.__internals;
     ok(/spawn\(shellCommandText\(inv\.cmd\), \[\.\.\.inv\.prefix, 'plugin', '--profile', 'web', 'add', plugin\]/.test(src), '插件安装走已解析 CLI 并保留 web profile');
     ok(/DESKTOP_CLI_REL = path\.join\('resources', 'runtime', 'cli', 'bin', 'dsh\.cmd'\)/.test(src), '桌面版 CLI 相对路径常量固定');
     ok(/InstallLocation/.test(src), '从注册表 InstallLocation 定位安装目录');
+    ok(/parseRegKeys/.test(src), '对 /d 命中的键做二次读取（自定义安装目录）');
+    ok(/parseInstallDirFromEntry/.test(src), 'InstallLocation 缺失时退回 DisplayIcon 目录');
     ok(/官网 Windows 桌面版/.test(src), '错误页文案提到桌面版安装途径');
   }
 
