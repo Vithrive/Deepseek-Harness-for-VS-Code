@@ -13,6 +13,13 @@
 
 ## 🆕 最近版本新增功能
 
+### v1.1.2 —— 修复桌面版装在自定义目录时无法识别（Issue #29，2026-11）
+
+- **现象**：官网 Windows 桌面版装在自定义目录（如 `E:\DSH`）时，面板报「未检测到 DeepSeek Harness … 且已取消安装」，扩展检测不到桌面版内置 CLI。
+- **根因**：探测器用 `reg query … /s /f "DeepSeek Harness" /d` 按「数据」搜索卸载项，`/d` 只打印**数据命中**的值行。默认安装路径本身含 "DeepSeek Harness"，于是 `InstallLocation` 那行恰好命中、能拿到；自定义目录（`E:\DSH`）的 `InstallLocation` 数据不含产品名，这一行根本不会出现在输出里——而旧实现只从输出里找 `InstallLocation` 行，所以漏掉。这也解释了为什么默认路径下从未暴露。
+- **修复**：先用 `/f … /d` 找出命中的卸载项**子键**，再对每个子键执行 `reg query <子键>` 读取**全部值**，从 `InstallLocation` 取安装目录——与安装路径是否含产品名无关；`InstallLocation` 缺失时，用 `DisplayIcon` / `UninstallString` 里的可执行文件路径反推目录；旧的「直接从搜索输出解析」保留作兜底；`REG_EXPAND_SZ` 里的 `%ProgramFiles%` 等变量会先展开。
+- **验证**：`desktop-app-support` 测试 37 → 62 项断言（新增自定义目录复现、子键解析、含空格子键引号、DisplayIcon/UninstallString 兜底、环境变量展开、注入式 probe 命中）；本机另做了实机复现验证（伪造一个安装目录不含产品名的卸载项，旧逻辑取不到、新逻辑正确命中）。
+
 ### v1.1.1 —— 修复面板内「复制」按钮无反应（Issue #28，2026-11）
 
 - **根因（VS Code 层面）**：面板把 DSH 以跨源 iframe 内嵌在 webview 里，而 VS Code 的 Electron 权限处理器只对 `requestingUrl` 以 `vscode-webview://` 开头的请求放行 `clipboard-read` / `clipboard-sanitized-write`；iframe 的来源是 `http://127.0.0.1:<port>`，于是 `navigator.clipboard.writeText()` 被拒（`Write permission denied`）。iframe 上的 `allow="clipboard-read; clipboard-write"` 只做 Permissions Policy 委派，管不到这层权限处理器（上游 microsoft/vscode#182642 仍 open）。
@@ -75,7 +82,7 @@
 
 从 [官网](https://deepseek.com) 下载安装的 **DeepSeek Harness Windows 桌面版**是 Electron 应用，DSH 运行时内嵌在 `app.asar` 里、`dsh` 也不在 PATH 上，所以早期版本会把它误判成「未安装」。v1.0.1 起扩展会自动识别：
 
-- **安装位置**：优先读注册表卸载项的 `InstallLocation`（`HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall`，兼容机器级安装），再兜底常见的 `%LOCALAPPDATA%\Programs\DeepSeek Harness` 等目录；
+- **安装位置**：优先读注册表卸载项的 `InstallLocation`（`HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall`，兼容机器级安装；**v1.1.2 起支持自定义安装目录**，如 `E:\DSH`——先按卸载项找到命中子键，再逐个子键读 `InstallLocation`，缺失时从 `DisplayIcon` / `UninstallString` 反推），再兜底常见的 `%LOCALAPPDATA%\Programs\DeepSeek Harness` 等目录；
 - **启动方式**：用桌面版自带的内置 CLI `<安装目录>\resources\runtime\cli\bin\dsh.cmd` 起一个 `dsh web` 实例（默认端口仍是 `dshPanel.port` = 3080），走的仍是 **web profile**——扩展的配套插件（`dsh-drop-caret` / `dsh-webview-clipboard` / `dsh-vscode-file-links`）照常安装并生效；
 - **认证**：桌面版 CLI 打印的启动链接里同样带令牌，扩展受管认证代理照旧无感完成浏览器认证；
 - **与桌面 App 的关系**：桌面 App 自己的后端固定为 `127.0.0.1:19387` + `desktop` profile，且带浏览器认证（令牌只经 Electron IPC 下发，外部无法复用），因此面板**不接管**桌面 App 正在运行的那个实例，而是用同一个 `~/.dsh` 起一个独立的 web 实例：**会话与凭据共享，插件/界面设置各自独立**——同一个会话在 App 与 VS Code 面板里都能看到；
@@ -290,7 +297,7 @@ DSH：用自己的一套 harness（记忆 / 技能 / AGENTS.md / 工具 / agent 
 
 ## 🌱 版本状态声明
 
-**1.0.0 起为正式版本；1.0.1 增加官网 Windows 桌面版支持；1.0.2 支持 Remote-SSH / Dev Containers；1.1.0 支持在远端面板里用本机浏览器完成 DeepSeek 账号登录；1.1.1 修复面板内复制按钮（宿主剪贴板中继）**：忠实窗口（面板）与 Copilot 桥接两条能力线都已长期自用 + 回归测试覆盖，功能完整可用：
+**1.0.0 起为正式版本；1.0.1 增加官网 Windows 桌面版支持；1.0.2 支持 Remote-SSH / Dev Containers；1.1.0 支持在远端面板里用本机浏览器完成 DeepSeek 账号登录；1.1.1 修复面板内复制按钮（宿主剪贴板中继）；1.1.2 支持桌面版自定义安装目录（如 E:\DSH）**：忠实窗口（面板）与 Copilot 桥接两条能力线都已长期自用 + 回归测试覆盖，功能完整可用：
 
 - 两条能力线：**忠实窗口**（把 DSH Web GUI 原样内嵌到侧边栏 / 编辑器标签页）与 **Copilot 桥接**（把 DSH 注册为 VS Code 聊天模型）——桥接仍在持续跟进 DeepSeek 模型与 dsh 版本演进，遇到不一致会在扩展内明确告警而不是静默降级；
 - 欢迎大家在不同操作系统（Windows / macOS / Linux，以及 Remote-SSH、WSL、Dev Containers 等远程场景）中测试使用；

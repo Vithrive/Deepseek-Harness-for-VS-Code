@@ -2,6 +2,27 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。完整提交历史见 [GitHub](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/commits/main)。
 
+## 1.1.2 —— 修复桌面版装在自定义目录时无法识别（Issue #29）
+
+**忠实窗口（面板）**
+
+- **现象**：官网 Windows 桌面版装在自定义目录（如 `E:\DSH`）时，扩展检测不到桌面版内置 CLI，面板报「未检测到 DeepSeek Harness … 且已取消安装」（环境：Win11、扩展 1.1.1、桌面版 0.2.1-rc.5 装于 `E:\DSH`）。
+- **根因**：探测用 `reg query … /s /f "DeepSeek Harness" /d` 按「数据」搜索卸载项，`/d` 只打印**数据命中**的值行。默认安装路径本身含 "DeepSeek Harness"，`InstallLocation` 那行恰好命中、能被旧解析拿到；自定义目录的 `InstallLocation` 数据（`E:\DSH`）不含产品名，于是该行根本不出现在输出里——旧实现只从输出里找 `InstallLocation` 行，因此漏掉。这也解释了为什么默认路径下从未暴露。
+- **修复**：
+  - 先用 `/f … /d` 找出命中的卸载项**子键**（`parseRegKeyPaths`），再对每个子键执行 `reg query <子键>` 读取**全部值**（`parseRegSubkeyDirs`），`InstallLocation` 优先——与安装路径是否含产品名无关；
+  - `InstallLocation` 缺失时，从 `DisplayIcon` / `UninstallString` 指向的可执行文件路径反推安装目录；
+  - 子键路径含空格时作为 cmd.exe 参数整体加引号；
+  - `REG_EXPAND_SZ` 的 `%ProgramFiles%` 等变量先展开（`expandRegEnv`）；
+  - 旧的「直接从搜索输出解析 InstallLocation」保留作兜底；默认安装目录兜底逻辑不变；
+  - `probeDesktopDshCli` 增加测试注入口（`run` / `exists` / `env` / `force`），便于跨平台单测。
+
+**测试**
+
+- `desktop-app-support` 从 37 项断言扩展到 **62 项**：自定义目录复现（`/f … /d` 输出无 `InstallLocation`）、子键提取与逐条读取、`DisplayIcon` / `UninstallString` 兜底、含空格子键加引号、`REG_EXPAND_SZ` 展开、注入式 `probeDesktopDshCli` 命中自定义目录；
+- 实机复现验证（Windows）：伪造一个安装目录不含产品名的卸载项，旧解析取不到、新逻辑正确命中，验证后已清理测试键；
+- `e2e-real-dsh`（真实 dsh 端到端）：适配 dsh 0.2.2-rc.4 的 `session/page` 错误文案（从 "past cursor N" 变为 "… exceeds N"），游标探测两种文案都兼容；
+- 全套 16 个测试套件（479 项断言）+ 真实 dsh 0.2.2-rc.4 e2e 全绿。
+
 ## 1.1.1 —— 修复面板内「复制」按钮无反应（Issue #28）
 
 **忠实窗口（面板）**

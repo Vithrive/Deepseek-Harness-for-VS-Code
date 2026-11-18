@@ -105,6 +105,51 @@ const I = ext.__internals;
     ok(I.parseRegInstallLocations(null).length === 0, 'null 输出返回空数组');
   }
 
+  // ── Issue #29：自定义安装目录（E:\DSH）时 /f … /d 输出不含 InstallLocation ──
+  const CUSTOM_SUBKEY = 'HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\1bf39983-50d0-5fe0-9ef4-cece76f67c5e';
+  // 真实复现输出：只有 4 行——子键 + DisplayName/DisplayVersion + End of search。
+  const CUSTOM_SEARCH_OUT = [
+    '',
+    CUSTOM_SUBKEY,
+    '    DisplayName    REG_SZ    DeepSeek Harness 0.2.1-rc.5',
+    '    DisplayVersion    REG_SZ    0.2.1-rc.5',
+    '',
+    'End of search: 1 match(es) found.',
+    ''
+  ].join('\r\n');
+  const CUSTOM_SUBKEY_OUT = [
+    '',
+    CUSTOM_SUBKEY,
+    '    DisplayName    REG_SZ    DeepSeek Harness 0.2.1-rc.5',
+    '    InstallLocation    REG_SZ    E:\\DSH',
+    '    DisplayIcon    REG_SZ    E:\\DSH\\DeepSeek Harness.exe,0',
+    '    UninstallString    REG_SZ    "E:\\DSH\\Uninstall DeepSeek Harness.exe" /currentuser',
+    ''
+  ].join('\r\n');
+
+  console.log('[2b] Issue #29：/f … /d 输出不含 InstallLocation（旧解析漏掉自定义目录）');
+  {
+    ok(I.parseRegInstallLocations(CUSTOM_SEARCH_OUT).length === 0, '复现：自定义目录下旧解析拿不到安装目录');
+    const keys = I.parseRegKeyPaths(CUSTOM_SEARCH_OUT);
+    ok(keys.length === 1 && keys[0] === CUSTOM_SUBKEY, 'parseRegKeyPaths 取出命中的卸载项子键');
+    ok(I.parseRegKeyPaths('').length === 0 && I.parseRegKeyPaths(null).length === 0, '空/null 输出返回空数组');
+    const dirs = I.parseRegSubkeyDirs(CUSTOM_SUBKEY_OUT);
+    ok(dirs.includes('E:\\DSH'), '逐个子键读取后可拿到 InstallLocation = E:\\DSH');
+    ok(dirs.filter((d) => d === 'E:\\DSH').length === 3, 'InstallLocation / DisplayIcon / UninstallString 三条路径都归一到安装目录');
+  }
+
+  console.log('[2c] 子键值解析的边界（DisplayIcon / UninstallString / 引号 / 环境变量）');
+  {
+    ok(I.parseRegSubkeyDirs('    InstallLocation    REG_EXPAND_SZ    %ProgramFiles%\\DeepSeek Harness').includes('%ProgramFiles%\\DeepSeek Harness'), 'REG_EXPAND_SZ 原样返回，由 expandRegEnv 展开');
+    ok(I.parseRegSubkeyDirs('    DisplayIcon    REG_SZ    "D:\\Apps\\DeepSeek Harness\\DeepSeek Harness.exe",0').includes('D:\\Apps\\DeepSeek Harness'), 'DisplayIcon 去引号/图标序号后取父目录');
+    ok(I.parseRegSubkeyDirs('    UninstallString    REG_SZ    "D:\\Apps\\DeepSeek Harness\\Uninstall DeepSeek Harness.exe" /currentuser /S').includes('D:\\Apps\\DeepSeek Harness'), 'UninstallString 从带参数的可执行文件路径取父目录');
+    ok(I.parseRegSubkeyDirs('').length === 0 && I.parseRegSubkeyDirs(null).length === 0, '空/null 输出返回空数组');
+    ok(I.expandRegEnv('%ProgramFiles%\\DeepSeek Harness', { ProgramFiles: 'C:\\Program Files' }) === 'C:\\Program Files\\DeepSeek Harness', 'expandRegEnv 展开 %ProgramFiles%');
+    ok(I.expandRegEnv('%UNKNOWN%\\x', {}) === '%UNKNOWN%\\x', '未知变量保持原样');
+    ok(I.windowsDirname('E:\\DSH\\resources\\runtime\\cli\\bin\\dsh.cmd') === 'E:\\DSH\\resources\\runtime\\cli\\bin', 'windowsDirname 跨平台可用');
+    ok(I.windowsDirname('E:\\DSH\\DeepSeek Harness.exe') === 'E:\\DSH', 'windowsDirname 从可执行文件路径取父目录');
+  }
+
   console.log('[3] shellCommandText：含空格路径的 cmd.exe 引号');
   {
     // 造一个「父目录带空格 + 文件存在」的真实路径
@@ -183,10 +228,106 @@ const I = ext.__internals;
     ok(/spawn\(shellCommandText\(inv\.cmd\), \[\.\.\.inv\.prefix, 'plugin', '--profile', 'web', 'add', plugin\]/.test(src), '插件安装走已解析 CLI 并保留 web profile');
     ok(/DESKTOP_CLI_REL = path\.join\('resources', 'runtime', 'cli', 'bin', 'dsh\.cmd'\)/.test(src), '桌面版 CLI 相对路径常量固定');
     ok(/InstallLocation/.test(src), '从注册表 InstallLocation 定位安装目录');
+    ok(/parseRegKeyPaths/.test(src), 'Issue #29 修复：先取命中子键再逐条读取（parseRegKeyPaths）');
+    ok(/reg', \['query', quoteArg\(subkey\)\]/.test(src), '对每个卸载项子键执行 reg query <子键> 读取全部值');
+    ok(/parseRegSubkeyDirs/.test(src), '子键值解析覆盖 InstallLocation / DisplayIcon / UninstallString');
     ok(/官网 Windows 桌面版/.test(src), '错误页文案提到桌面版安装途径');
   }
 
-  console.log('[6] 本机真实探测（信息性，不做硬断言）');
+  console.log('[7] probeDesktopDshCli 注入测试：自定义安装目录 E:\\DSH 可被识别');
+  {
+    const cliRel = 'resources\\runtime\\cli\\bin\\dsh.cmd';
+    const customCli = 'E:\\DSH\\' + cliRel;
+    const calls = [];
+    const run = async (cmd, args) => {
+      calls.push([cmd, args]);
+      if (cmd !== 'reg') throw new Error('unexpected command: ' + cmd);
+      const joined = args.join(' ');
+      if (args.includes('/s')) {
+        // /f … /d 搜索：仅 HKCU 有命中项，且命中输出里没有 InstallLocation（Issue #29 的原始证据）
+        if (args[1] === 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall') return CUSTOM_SEARCH_OUT;
+        throw new Error('no match');
+      }
+      // 逐个子键读取：返回包含 InstallLocation 的完整值列表
+      return CUSTOM_SUBKEY_OUT;
+    };
+    const exists = (p) => p.toLowerCase() === customCli.toLowerCase();
+    const found = await I.probeDesktopDshCli({ run, exists, env: {}, force: true });
+    ok(found && found.installDir === 'E:\\DSH', '自定义目录 E:\\DSH 的桌面版被识别（旧逻辑会漏掉）');
+    ok(found && found.cmd.endsWith(cliRel), '返回内置 CLI 完整路径');
+    const detailCalls = calls.filter(([, args]) => !args.includes('/s'));
+    ok(detailCalls.length >= 1, '对命中的卸载项子键执行了逐条 reg query');
+    ok(detailCalls.some(([, args]) => args.join(' ').includes(CUSTOM_SUBKEY)), '逐条查询的正是 /f … /d 命中的子键');
+
+    // 子键路径含空格时作为 cmd.exe 参数必须加引号
+    const spacedSubkey = 'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\DeepSeek Harness';
+    const spacedCalls = [];
+    const runSpaced = async (cmd, args) => {
+      spacedCalls.push(args);
+      if (args.includes('/s')) return ['', spacedSubkey, '    DisplayName    REG_SZ    DeepSeek Harness', ''].join('\r\n');
+      return CUSTOM_SUBKEY_OUT;
+    };
+    await I.probeDesktopDshCli({ run: runSpaced, exists: () => false, env: {}, force: true });
+    ok(spacedCalls.some((args) => args[1] === '"' + spacedSubkey + '"'), '含空格的子键路径整体加引号');
+
+    // 只有 DisplayIcon / UninstallString（InstallLocation 被清理）也能反推目录
+    const iconOnly = [
+      '',
+      CUSTOM_SUBKEY,
+      '    DisplayName    REG_SZ    DeepSeek Harness 0.2.1-rc.5',
+      '    DisplayIcon    REG_SZ    E:\\DSH\\DeepSeek Harness.exe,0',
+      '    UninstallString    REG_SZ    "E:\\DSH\\Uninstall DeepSeek Harness.exe" /currentuser',
+      ''
+    ].join('\r\n');
+    const runIcon = async (cmd, args) => {
+      if (args.includes('/s')) return CUSTOM_SEARCH_OUT;
+      return iconOnly;
+    };
+    const foundIcon = await I.probeDesktopDshCli({ run: runIcon, exists, env: {}, force: true });
+    ok(foundIcon && foundIcon.installDir === 'E:\\DSH', 'InstallLocation 缺失时用 DisplayIcon/UninstallString 反推目录');
+
+    // 默认安装目录（路径含产品名）仍走旧解析，且不会多打逐条查询
+    const DEFAULT_SEARCH = [
+      '',
+      CUSTOM_SUBKEY,
+      '    DisplayName    REG_SZ    DeepSeek Harness',
+      '    InstallLocation    REG_SZ    V:\\Apps\\DeepSeek Harness',
+      ''
+    ].join('\r\n');
+    const defaultCalls = [];
+    const runDefault = async (cmd, args) => {
+      defaultCalls.push(args);
+      if (args.includes('/s')) return DEFAULT_SEARCH;
+      return DEFAULT_SEARCH;
+    };
+    const defaultCli = 'V:\\Apps\\DeepSeek Harness\\' + cliRel;
+    const foundDefault = await I.probeDesktopDshCli({
+      run: runDefault,
+      exists: (p) => p.toLowerCase() === defaultCli.toLowerCase(),
+      env: {},
+      force: true
+    });
+    ok(foundDefault && foundDefault.installDir === 'V:\\Apps\\DeepSeek Harness', '默认安装路径仍按旧解析直接命中');
+    ok(defaultCalls.filter((args) => !args.includes('/s')).length >= 1, '默认路径同样会逐条读取（兼容 InstallLocation 被过滤的安装器）');
+
+    // REG_EXPAND_SZ 的环境变量展开后能命中
+    const runExpand = async (cmd, args) => {
+      if (args.includes('/s')) {
+        return ['', CUSTOM_SUBKEY, '    DisplayName    REG_SZ    DeepSeek Harness', ''].join('\r\n');
+      }
+      return ['', CUSTOM_SUBKEY, '    InstallLocation    REG_EXPAND_SZ    %ProgramFiles%\\DeepSeek Harness', ''].join('\r\n');
+    };
+    const pfCli = 'C:\\PF\\DeepSeek Harness\\' + cliRel;
+    const foundExpand = await I.probeDesktopDshCli({
+      run: runExpand,
+      exists: (p) => p.toLowerCase() === pfCli.toLowerCase(),
+      env: { ProgramFiles: 'C:\\PF' },
+      force: true
+    });
+    ok(foundExpand && foundExpand.installDir === 'C:\\PF\\DeepSeek Harness', 'REG_EXPAND_SZ 的 %ProgramFiles% 展开后命中');
+  }
+
+  console.log('[8] 本机真实探测（信息性，不做硬断言）');
   {
     const found = await I.probeDesktopDshCli();
     if (found) {

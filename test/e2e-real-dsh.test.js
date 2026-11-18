@@ -188,10 +188,11 @@ async function main() {
     });
     let cursor = -1;
     const probe = await getJson(pport, '/api/session/page', 'POST', pageCall(Number.MAX_SAFE_INTEGER));
-    const pm = /past cursor (-?\d+)/.exec(probe.body);
+    // 错误文案随 dsh 版本变化：0.2.1 为 "past cursor N"，0.2.2 起为 "… exceeds N"。
+    const pm = /past cursor (-?\d+)/.exec(probe.body) || /exceeds (-?\d+)/.exec(probe.body);
     if (pm) cursor = parseInt(pm[1], 10);
     console.log('    POST 代理 /api/session/page 探测 → 游标 ' + cursor);
-    assert.ok(cursor >= 0, '应从错误信息解析出游标');
+    assert.ok(cursor >= 0, '应从错误信息解析出游标（兼容 "past cursor N" / "exceeds N"）：' + probe.body.slice(0, 200));
     const pg = await getJson(pport, '/api/session/page', 'POST', pageCall(cursor));
     assert.strictEqual(pg.status, 200, '经代理 session/page 应 200');
     const pgParsed = JSON.parse(pg.body);
