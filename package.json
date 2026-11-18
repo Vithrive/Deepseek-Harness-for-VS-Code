@@ -1,8 +1,8 @@
 {
   "name": "deepseek-harness-vscode",
   "displayName": "DeepSeek Harness for VSCode",
-  "description": "DeepSeek Harness (DSH) 的 VS Code 接入：侧边栏/标签页忠实呈现 DSH Web GUI 并自动检测启动，不影响用户对 DSH 本身的页面组织、第三方插件装配等二次开发行为；v0.7.13 起把 DSH 注册为 Copilot 聊天模型——模型选择器里出现 DeepSeek Harness 下属模型条目，接收 Copilot 组织好的现成对话、滤除对话内容无关的 prompt、交给 DSH 二次组织、流式回写，旨在利用 DSH 强大的任务编排与工具调用能力，发挥最大性能；v1.0.1 起自动识别官网 Windows 桌面版，用其内置 dsh CLI 启动（无需 npm/Node）；v1.1.0 起在 Remote-WSL / Remote-SSH 面板里用本机浏览器完成 DeepSeek 账号登录；v1.1.1 起面板内复制按钮经宿主剪贴板中继恢复可用；v1.1.2 支持桌面版自定义安装目录（如 E:\\DSH）",
-  "version": "1.1.2",
+  "description": "DeepSeek Harness (DSH) 的 VS Code 接入：侧边栏/标签页忠实呈现 DSH Web GUI 并自动检测启动，不影响用户对 DSH 本身的页面组织、第三方插件装配等二次开发行为；v0.7.13 起把 DSH 注册为 Copilot 聊天模型——模型选择器里出现 DeepSeek Harness 下属模型条目，接收 Copilot 组织好的现成对话、滤除对话内容无关的 prompt、交给 DSH 二次组织、流式回写，旨在利用 DSH 强大的任务编排与工具调用能力，发挥最大性能；v1.0.1 起自动识别官网 Windows 桌面版，用其内置 dsh CLI 启动（无需 npm/Node）；v1.1.0 起在 Remote-WSL / Remote-SSH 面板里用本机浏览器完成 DeepSeek 账号登录；v1.1.1 起面板内复制按钮经宿主剪贴板中继恢复可用；v1.1.2 支持桌面版自定义安装目录（如 E:\\DSH）；v1.1.3 配套插件防清理 + 文件链接 anchor 兜底",
+  "version": "1.1.3",
   "publisher": "vithrive",
   "license": "MIT",
   "icon": "media/icon.png",

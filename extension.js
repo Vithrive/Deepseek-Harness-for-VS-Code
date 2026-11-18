@@ -2116,6 +2116,92 @@ async function installedPluginVersion(profileDir, plugin) {
   return pkg && pkg.version ? pkg.version : null;
 }
 
+/** 读取「插件包根目录」下的 package.json 版本（用于 vendor 副本）；不存在返回 null。 */
+async function pluginVersionAt(dir) {
+  const pkg = await readJsonFile(path.join(dir, 'package.json'));
+  return pkg && pkg.version ? pkg.version : null;
+}
+
+/** 随扩展分发的内置插件在 profile 里的 vendored 副本目录名。 */
+const VENDORED_PLUGINS_DIR = 'vendor';
+
+/**
+ * 内置插件在 profile package.json 里的依赖声明：`file:./vendor/<name>`。
+ *
+ * 为什么要写 dependencies（Issue #31）：扩展把插件直接写进 profile 的
+ * node_modules，但 pnpm（`dsh plugin add/install` 的底层）会把不在 dependencies
+ * 里的包当 extraneous 移到 node_modules/.ignored，dsh 启动时于是静默跳过这些
+ * bundle——文件链接跳转、剪贴板中继、window.open 重定向全部悄悄失效。
+ * 把插件同时写一份到 profile/vendor/ 并以 file: 依赖声明，pnpm 就会把它们当正常
+ * 依赖保留并链接回 node_modules。
+ * @param {string} name
+ * @returns {string}
+ */
+function vendoredPluginSpec(name) {
+  return 'file:./' + VENDORED_PLUGINS_DIR + '/' + name;
+}
+
+/**
+ * 幂等写入内置插件文件：同时写 vendor/<name>（pnpm 保留的稳定副本）与
+ * node_modules/<name>（dsh 立即加载用；若已被 pnpm 链接到 vendor，写入等价）。
+ * @param {string} profileDir
+ * @param {string} name
+ * @param {Record<string, string>} files 相对路径 → 内容
+ */
+async function writeBundledPlugin(profileDir, name, files) {
+  const bases = [
+    path.join(profileDir, VENDORED_PLUGINS_DIR, name),
+    path.join(profileDir, 'node_modules', name)
+  ];
+  for (const base of bases) {
+    for (const rel of Object.keys(files)) {
+      const dest = path.join(base, rel);
+      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+      await fs.promises.writeFile(dest, files[rel], 'utf8');
+    }
+  }
+}
+
+/**
+ * 内置插件是否需要（重新）落盘：node_modules 缺失/版本不符（例如被 dsh plugin
+ * 命令清理进了 .ignored），或 vendor 副本缺失/版本不符（v1.1.3 起才有的副本）。
+ * @param {string} profileDir
+ * @param {string} name
+ * @param {string} version
+ * @returns {Promise<boolean>}
+ */
+async function bundledPluginNeedsInstall(profileDir, name, version) {
+  const installed = await installedPluginVersion(profileDir, name);
+  const vendored = await pluginVersionAt(path.join(profileDir, VENDORED_PLUGINS_DIR, name));
+  return installed !== version || vendored !== version;
+}
+
+/**
+ * 通用：确保随扩展分发的内置插件已落盘（vendor + node_modules）并声明为
+ * `file:./vendor/<name>` 依赖。
+ * @param {string} profileDir
+ * @param {string} name
+ * @param {string} version 扩展内置版本
+ * @param {() => Record<string, string>} filesGetter
+ * @param {string} label 报错时给人看的插件名
+ * @returns {Promise<boolean>} 本次是否发生新增/升级/修复（true 时需重启 dsh web 生效）
+ */
+async function ensureBundledPlugin(profileDir, name, version, filesGetter, label) {
+  try {
+    if (!(await bundledPluginNeedsInstall(profileDir, name, version))) {
+      await ensureProfileDeclaration(profileDir, name, vendoredPluginSpec(name));
+      return false;
+    }
+    await writeBundledPlugin(profileDir, name, filesGetter());
+    await ensureProfileDeclaration(profileDir, name, vendoredPluginSpec(name));
+    return true;
+  } catch (e) {
+    console.error(`[DeepSeek Harness] 安装内置插件 ${name} 失败：`, e);
+    vscode.window.showWarningMessage(`安装 ${label} ${name} 失败：${e.message}`);
+    return false;
+  }
+}
+
 /** 用 npm pack 拉取插件并解压到 profile 的 node_modules（不依赖 pnpm）。 */
 async function installPluginViaNpm(profileDir, plugin) {
   // 安全面守卫：plugin 仅允许内置常量（npm pack/tar 的命令拼接不做通用转义）。
@@ -2232,31 +2318,18 @@ function clipboardPluginVersion() {
 
 /**
  * 确保内置兼容插件 dsh-webview-clipboard 已落盘并声明（不经 npm）。
- * @returns {Promise<boolean>} 本次是否发生新增/升级（true 时需重启 dsh web 生效）。
+ * v1.1.3 起同时写 vendor/ 副本并声明 `file:` 依赖，避免被 `dsh plugin` 的 pnpm
+ * 当成 extraneous 清理（Issue #31）。
+ * @returns {Promise<boolean>} 本次是否发生新增/升级/修复（true 时需重启 dsh web 生效）。
  */
 async function ensureClipboardPlugin(profileDir) {
-  try {
-    const version = clipboardPluginVersion();
-    const installed = await installedPluginVersion(profileDir, CLIPBOARD_PLUGIN_NAME);
-    if (installed === version) {
-      await ensureProfileDeclaration(profileDir, CLIPBOARD_PLUGIN_NAME, null);
-      return false; // 版本一致，无需写入
-    }
-    const files = clipboardPluginFiles();
-    const base = path.join(profileDir, 'node_modules', CLIPBOARD_PLUGIN_NAME);
-    for (const rel of Object.keys(files)) {
-      const dest = path.join(base, rel);
-      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-      await fs.promises.writeFile(dest, files[rel], 'utf8');
-    }
-    // dependencies 不写入该包（npm 注册表上没有），只登记 bundles 供 DSH 加载。
-    await ensureProfileDeclaration(profileDir, CLIPBOARD_PLUGIN_NAME, null);
-    return true;
-  } catch (e) {
-    console.error(`[DeepSeek Harness] 安装内置插件 ${CLIPBOARD_PLUGIN_NAME} 失败：`, e);
-    vscode.window.showWarningMessage(`安装 DSH 剪贴板兼容插件 ${CLIPBOARD_PLUGIN_NAME} 失败：${e.message}`);
-    return false;
-  }
+  return ensureBundledPlugin(
+    profileDir,
+    CLIPBOARD_PLUGIN_NAME,
+    clipboardPluginVersion(),
+    clipboardPluginFiles,
+    'DSH 剪贴板兼容插件'
+  );
 }
 
 /**
@@ -2286,31 +2359,17 @@ function fileLinkPluginVersion() {
 
 /**
  * 确保内置插件 dsh-vscode-file-links 已落盘并声明（不经 npm）。
- * @returns {Promise<boolean>} 本次是否发生新增/升级（true 时需重启 dsh web 生效）。
+ * v1.1.3 起同时写 vendor/ 副本并声明 `file:` 依赖（Issue #31）。
+ * @returns {Promise<boolean>} 本次是否发生新增/升级/修复（true 时需重启 dsh web 生效）。
  */
 async function ensureFileLinkPlugin(profileDir) {
-  try {
-    const version = fileLinkPluginVersion();
-    const installed = await installedPluginVersion(profileDir, FILE_LINK_PLUGIN_NAME);
-    if (installed === version) {
-      await ensureProfileDeclaration(profileDir, FILE_LINK_PLUGIN_NAME, null);
-      return false; // 版本一致，无需写入
-    }
-    const files = fileLinkPluginFiles();
-    const base = path.join(profileDir, 'node_modules', FILE_LINK_PLUGIN_NAME);
-    for (const rel of Object.keys(files)) {
-      const dest = path.join(base, rel);
-      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-      await fs.promises.writeFile(dest, files[rel], 'utf8');
-    }
-    // dependencies 不写入该包（npm 注册表上没有），只登记 bundles 供 DSH 加载。
-    await ensureProfileDeclaration(profileDir, FILE_LINK_PLUGIN_NAME, null);
-    return true;
-  } catch (e) {
-    console.error(`[DeepSeek Harness] 安装内置插件 ${FILE_LINK_PLUGIN_NAME} 失败：`, e);
-    vscode.window.showWarningMessage(`安装 DSH 工作区文件链接插件 ${FILE_LINK_PLUGIN_NAME} 失败：${e.message}`);
-    return false;
-  }
+  return ensureBundledPlugin(
+    profileDir,
+    FILE_LINK_PLUGIN_NAME,
+    fileLinkPluginVersion(),
+    fileLinkPluginFiles,
+    'DSH 工作区文件链接插件'
+  );
 }
 
 /**
@@ -2338,31 +2397,17 @@ function openExternalPluginVersion() {
 
 /**
  * 确保内置插件 dsh-vscode-open-external 已落盘并声明（不经 npm）。
- * @returns {Promise<boolean>} 本次是否发生新增/升级（true 时需重启 dsh web 生效）。
+ * v1.1.3 起同时写 vendor/ 副本并声明 `file:` 依赖（Issue #31）。
+ * @returns {Promise<boolean>} 本次是否发生新增/升级/修复（true 时需重启 dsh web 生效）。
  */
 async function ensureOpenExternalPlugin(profileDir) {
-  try {
-    const version = openExternalPluginVersion();
-    const installed = await installedPluginVersion(profileDir, OPEN_EXTERNAL_PLUGIN_NAME);
-    if (installed === version) {
-      await ensureProfileDeclaration(profileDir, OPEN_EXTERNAL_PLUGIN_NAME, null);
-      return false; // 版本一致，无需写入
-    }
-    const files = openExternalPluginFiles();
-    const base = path.join(profileDir, 'node_modules', OPEN_EXTERNAL_PLUGIN_NAME);
-    for (const rel of Object.keys(files)) {
-      const dest = path.join(base, rel);
-      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-      await fs.promises.writeFile(dest, files[rel], 'utf8');
-    }
-    // dependencies 不写入该包（npm 注册表上没有），只登记 bundles 供 DSH 加载。
-    await ensureProfileDeclaration(profileDir, OPEN_EXTERNAL_PLUGIN_NAME, null);
-    return true;
-  } catch (e) {
-    console.error(`[DeepSeek Harness] 安装内置插件 ${OPEN_EXTERNAL_PLUGIN_NAME} 失败：`, e);
-    vscode.window.showWarningMessage(`安装 DSH 外链打开插件 ${OPEN_EXTERNAL_PLUGIN_NAME} 失败：${e.message}`);
-    return false;
-  }
+  return ensureBundledPlugin(
+    profileDir,
+    OPEN_EXTERNAL_PLUGIN_NAME,
+    openExternalPluginVersion(),
+    openExternalPluginFiles,
+    'DSH 外链打开插件'
+  );
 }
 
 /**
@@ -2670,11 +2715,12 @@ async function preparePanelHtml(isTab) {
     };
   }
 
-  // 自动确保 DSH 侧配套插件 dsh-drop-caret 在位（拖文件/代码段插入对话框）。
+  // 自动确保 DSH 侧配套插件（dsh-drop-caret + 三个内置兼容插件）在位。
+  // v1.1.3 起还会修复被 `dsh plugin` 命令清理进 node_modules/.ignored 的插件（Issue #31）。
   const pluginInstalled = await ensureDshPlugins();
   if (pluginInstalled && (await checkUrl(getUrl()))) {
-    // 服务已在运行但插件刚装上，需重启 dsh web 才加载。
-    vscode.window.showInformationMessage('已自动安装/更新 DSH 插件（dsh-drop-caret / dsh-webview-clipboard / dsh-vscode-file-links），请点击面板顶部的「重启 dsh web」使其生效。');
+    // 服务已在运行但插件刚装上/被修复，需重启 dsh web 才加载。
+    vscode.window.showInformationMessage('已自动安装/更新或修复 DSH 配套插件（dsh-drop-caret / dsh-webview-clipboard / dsh-vscode-file-links / dsh-vscode-open-external）。这些插件可能被 dsh plugin 命令清理过（Issue #31），请点击面板顶部的「重启 dsh web」使其生效。');
   }
 
   const ok = await ensureRunningOnce();

@@ -106,6 +106,32 @@ function makeEnv(options = {}) {
     };
   }
 
+  /** 模拟普通 <a href> 链接（v0.2.0 起：某些渲染分支用 anchor 表示文件链接）。 */
+  function makeAnchor(opts = {}) {
+    const attrs = {};
+    if (opts.href !== undefined) attrs.href = opts.href;
+    const a = {
+      nodeType: 1,
+      tagName: 'A',
+      textContent: opts.text === undefined ? '' : opts.text,
+      getAttribute: (n) => (Object.prototype.hasOwnProperty.call(attrs, n) ? attrs[n] : null),
+      closest: (sel) => {
+        if (sel === 'a[href]') return a;
+        if (sel === 'button') return null;
+        return null;
+      },
+      click: () => dispatchClick(a)
+    };
+    return a;
+  }
+  function makeAnchorChild(anchor) {
+    return {
+      nodeType: 1,
+      tagName: 'SPAN',
+      closest: (sel) => (sel === 'a[href]' ? anchor : null)
+    };
+  }
+
   /** 把某来源的消息交给插件（默认来自父级 webview）。 */
   function hostMessageFrom(source, data) {
     const event = { source, data };
@@ -136,7 +162,7 @@ function makeEnv(options = {}) {
   let disposed = null;
   pluginExports.apply({ effect: (fn) => { disposed = fn(); } });
 
-  return { win, posted, dispatchClick, makeButton, makeChild, hostMessage, hostMessageFrom, runTimers, reactCalls, timers, dispose: () => disposed && disposed() };
+  return { win, posted, dispatchClick, makeButton, makeChild, makeAnchor, makeAnchorChild, hostMessage, hostMessageFrom, runTimers, reactCalls, timers, dispose: () => disposed && disposed() };
 }
 
 console.log('[1] 未握手（宿主未 ack）：完全不介入');
@@ -244,7 +270,50 @@ console.log('[7] 独立浏览器（无父级宿主）：完全惰性');
   const btn = env.makeButton({ title: 'src/a.ts' });
   const event = env.dispatchClick(btn);
   ok(env.reactCalls.length === 1 && event.defaultPrevented === false, '照旧走 DSH 自身行为');
-  ok(env.win.__dshVscodeFileLinks.version === '0.1.0' && env.win.__dshVscodeFileLinks.acked() === false, '暴露排障对象（version/acked）');
+  ok(env.win.__dshVscodeFileLinks.version === '0.2.0' && env.win.__dshVscodeFileLinks.acked() === false, '暴露排障对象（version/acked）');
+}
+
+console.log('[9] v0.2.0：普通 <a href> 形式的工作区文件链接（Issue #32）');
+{
+  const env = makeEnv({ name: 'dsh-vscode-host' });
+  env.hostMessage({ source: 'dsh-vscode-host', type: 'ack', fileLinks: true, mode: 'revealAndOpen' });
+
+  // 分隔符相对路径 anchor：接管并转发
+  const nested = env.makeAnchor({ href: '_tools/webread.ps1' });
+  const ev1 = env.dispatchClick(nested);
+  const reveal = env.posted.filter((m) => m.type === 'reveal');
+  ok(ev1.defaultPrevented === true && ev1.stopped === true, 'anchor（含分隔符路径）被接管：preventDefault + stopPropagation');
+  ok(reveal.length === 1 && reveal[0].path === '_tools/webread.ps1', 'anchor href 的路径被转发给宿主');
+  ok(env.reactCalls.length === 0, 'anchor 接管后阻断浏览器默认跳转/DSH 行为');
+  // 点击落在 anchor 内部子节点也命中
+  const ev1b = env.dispatchClick(env.makeAnchorChild(nested));
+  ok(ev1b.defaultPrevented === true, '点击落在 anchor 内部子节点也命中');
+
+  // 宿主回执 ok=false → 回放一次 anchor 点击（恢复默认行为）
+  env.hostMessage({ source: 'dsh-vscode-host', type: 'reveal-result', token: reveal[reveal.length - 1].token, ok: false });
+  ok(env.reactCalls.length >= 1, 'anchor 回执 ok=false 时回放原始点击');
+
+  // 不接管：外部链接 / 锚点 / 其它 scheme / 修饰键
+  env.reactCalls.length = 0;
+  const before = env.posted.filter((m) => m.type === 'reveal').length;
+  env.dispatchClick(env.makeAnchor({ href: 'https://example.com/x' }));
+  env.dispatchClick(env.makeAnchor({ href: 'http://example.com/y' }));
+  env.dispatchClick(env.makeAnchor({ href: '#section-2' }));
+  env.dispatchClick(env.makeAnchor({ href: 'mailto:a@b.com' }));
+  env.dispatchClick(env.makeAnchor({ href: 'file:///C:/x.txt' }));
+  env.dispatchClick(env.makeAnchor({ href: 'javascript:alert(1)' }));
+  ok(env.posted.filter((m) => m.type === 'reveal').length === before, '外部链接 / 锚点 / 非本地 scheme 一律不接管');
+  ok(env.reactCalls.length === 6, '以上点击均保持原有默认行为');
+
+  env.reactCalls.length = 0;
+  env.dispatchClick(env.makeAnchor({ href: '_tools/webread.ps1' }), { ctrlKey: true });
+  ok(env.reactCalls.length === 1 && env.posted.filter((m) => m.type === 'reveal').length === before, '修饰键点击 anchor 不接管');
+
+  // Windows 绝对路径（盘符）仍按本地路径接管
+  const abs = env.makeAnchor({ href: 'D:/AIworkspace/_tools/webread.ps1' });
+  env.dispatchClick(abs);
+  const absReveal = env.posted.filter((m) => m.type === 'reveal').slice(-1)[0];
+  ok(absReveal && absReveal.path === 'D:/AIworkspace/_tools/webread.ps1', '盘符绝对路径 anchor 也接管并转发');
 }
 
 console.log('[8] 插件卸载：监听器与定时器清理');

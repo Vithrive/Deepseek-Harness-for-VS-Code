@@ -13,6 +13,16 @@
 
 ## 🆕 最近版本新增功能
 
+### v1.1.3 —— 配套插件防清理（Issue #31）+ 文件链接 anchor 兜底（Issue #32，2026-11）
+
+- **配套插件不再被 `dsh plugin` 命令悄悄清掉（Issue #31）**：扩展会往 profile 的 `node_modules` 写三个配套插件（`dsh-webview-clipboard` / `dsh-vscode-file-links` / `dsh-vscode-open-external`），但它们此前不在 profile `dependencies` 里，`pnpm`（`dsh plugin add/install` 的底层）有把它们当 extraneous 移进 `node_modules/.ignored` 的风险——dsh 启动时于是静默跳过这些 bundle，文件链接跳转、剪贴板中继、`window.open` 重定向全部悄悄失效。现在：
+  - 插件同时写一份到 `profiles/web/vendor/<name>`，并在 profile `package.json` 里声明 `"<name>": "file:./vendor/<name>"`，pnpm 会把它们当正常依赖保留；
+  - 每次准备面板时仍会检查 `node_modules` / `vendor` 两侧，任一缺失或版本不符就自动重建（自愈）；
+  - 发生安装/修复且 dsh 已在运行时，提示点击「重启 dsh web」，不再静默降级。
+- **文件链接 anchor 兜底（Issue #32）**：内置插件 `dsh-vscode-file-links` 升级到 0.2.0——除了既有的 `button.fileLink`，现在也会接管普通 `<a href>` 形式的**本地路径**链接（相对路径 / `./` / 盘符绝对路径）。外部链接、`#锚点`、`mailto:` / `file:` / `javascript:` 等 scheme 一律不接管；宿主拒绝（不在工作区内）时回放原始点击，行为与原来一致。
+- **验证**：`file-link-client-sim` 27 → 36 项断言（含 anchor 接管、外部链接/锚点/scheme 不接管、修饰键、回执回放、盘符绝对路径）；新增 `bundled-plugin-vendor` 33 项断言（vendor + node_modules 双份落盘、`file:` 依赖声明、`node_modules`/`vendor` 缺失后自愈）；`workspace-file-link` 74 → 78 项断言。全套 17 个测试套件全绿。
+- **说明**：Issue #32 声称「路径含分隔符时 DSH 不渲染 `button.fileLink`」这一根因在 DSH 0.2.2-rc.1 / 0.2.2-rc.4 上均无法复现（链接均正常渲染、插件与宿主对分隔符路径也能正常解析）；该报告更可能与 #31 的配套插件被清理有关。0.2.0 的 anchor 兜底与 #31 的防清理一起覆盖了这两类失败路径。
+
 ### v1.1.2 —— 修复桌面版装在自定义目录时无法识别（Issue #29，2026-11）
 
 - **现象**：官网 Windows 桌面版装在自定义目录（如 `E:\DSH`）时，面板报「未检测到 DeepSeek Harness … 且已取消安装」，扩展检测不到桌面版内置 CLI。
@@ -131,7 +141,7 @@
 | `dshPanel.openSystemBrowser` | `false` | 扩展启动 dsh 时是否保留弹系统浏览器的旧行为 |
 | `dshPanel.installClipboardPlugin` | `true` | 自动安装内置 `dsh-webview-clipboard` 插件（v0.3.0 起：跨平台把面板内 `navigator.clipboard.writeText` 经宿主中继写入剪贴板，修复复制按钮静默失效；并修复 macOS 面板内编辑快捷键）。怀疑影响 dsh web 启动时可关闭对比 |
 | `dshPanel.installOpenExternalPlugin` | `true` | 自动安装内置 `dsh-vscode-open-external` 插件（v1.1.0 起）：面板内 `window.open`（典型：DeepSeek 账号登录授权页）改在本机系统浏览器打开——Remote-WSL / Remote-SSH 下由你的 Windows 浏览器打开 |
-| `dshPanel.workspaceFileLinkAction` | `revealAndOpen` | 对话里工作区文件/文件夹链接的点击行为：`revealAndOpen` 资源管理器定位并打开 / `revealOnly` 仅定位 / `off` 不接管（保持 DSH 侧边栏打开，也不安装配套插件） |
+| `dshPanel.workspaceFileLinkAction` | `revealAndOpen` | 对话里工作区文件/文件夹链接的点击行为（v1.1.3 起同时覆盖 `button.fileLink` 与普通 `<a href>` 本地路径链接）：`revealAndOpen` 资源管理器定位并打开 / `revealOnly` 仅定位 / `off` 不接管（保持 DSH 侧边栏打开，也不安装配套插件） |
 
 ### 点击对话里的文件/文件夹链接 → 在 VS Code 资源管理器中定位（v1.0.0 起）
 
@@ -297,7 +307,7 @@ DSH：用自己的一套 harness（记忆 / 技能 / AGENTS.md / 工具 / agent 
 
 ## 🌱 版本状态声明
 
-**1.0.0 起为正式版本；1.0.1 增加官网 Windows 桌面版支持；1.0.2 支持 Remote-SSH / Dev Containers；1.1.0 支持在远端面板里用本机浏览器完成 DeepSeek 账号登录；1.1.1 修复面板内复制按钮（宿主剪贴板中继）；1.1.2 支持桌面版自定义安装目录（如 E:\DSH）**：忠实窗口（面板）与 Copilot 桥接两条能力线都已长期自用 + 回归测试覆盖，功能完整可用：
+**1.0.0 起为正式版本；1.0.1 增加官网 Windows 桌面版支持；1.0.2 支持 Remote-SSH / Dev Containers；1.1.0 支持在远端面板里用本机浏览器完成 DeepSeek 账号登录；1.1.1 修复面板内复制按钮（宿主剪贴板中继）；1.1.2 支持桌面版自定义安装目录（如 E:\DSH）；1.1.3 配套插件防清理 + 文件链接 anchor 兜底**：忠实窗口（面板）与 Copilot 桥接两条能力线都已长期自用 + 回归测试覆盖，功能完整可用：
 
 - 两条能力线：**忠实窗口**（把 DSH Web GUI 原样内嵌到侧边栏 / 编辑器标签页）与 **Copilot 桥接**（把 DSH 注册为 VS Code 聊天模型）——桥接仍在持续跟进 DeepSeek 模型与 dsh 版本演进，遇到不一致会在扩展内明确告警而不是静默降级；
 - 欢迎大家在不同操作系统（Windows / macOS / Linux，以及 Remote-SSH、WSL、Dev Containers 等远程场景）中测试使用；

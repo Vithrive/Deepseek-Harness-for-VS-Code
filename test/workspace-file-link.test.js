@@ -241,13 +241,23 @@ vscodeStub.workspace.workspaceFolders = [{ uri: fileUri(REPO) }];
   const first = await I.ensureFileLinkPlugin(profileDir);
   ok(first === true, '首次安装返回「有变化」（提示用户重启 dsh web）');
   const installedDir = path.join(profileDir, 'node_modules', I.FILE_LINK_PLUGIN_NAME);
+  const vendoredDir = path.join(profileDir, 'vendor', I.FILE_LINK_PLUGIN_NAME);
   const installedPkg = JSON.parse(fs.readFileSync(path.join(installedDir, 'package.json'), 'utf8'));
-  ok(installedPkg.version === I.fileLinkPluginVersion(), '落盘版本与扩展内置版本一致');
-  ok(fs.existsSync(path.join(installedDir, 'lib', 'client.js')) && fs.existsSync(path.join(installedDir, 'cordis.patch.yml')), '客户端半边与 bundle patch 都已落盘');
+  ok(installedPkg.version === I.fileLinkPluginVersion(), '落盘版本与扩展内置版本一致（0.2.0）');
+  ok(fs.existsSync(path.join(installedDir, 'lib', 'client.js')) && fs.existsSync(path.join(installedDir, 'cordis.patch.yml')), 'node_modules 副本完整（client + patch）');
+  ok(fs.existsSync(path.join(vendoredDir, 'package.json')) && fs.existsSync(path.join(vendoredDir, 'lib', 'client.js')), 'vendor 副本同样落盘（Issue #31：pnpm 会保留的稳定位置）');
   const profilePkg = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'));
   ok(profilePkg.dsh.profile.bundles.includes(I.FILE_LINK_PLUGIN_NAME), '已登记到 profile 的 dsh.profile.bundles（DSH 才会加载）');
-  ok(!profilePkg.dependencies || !profilePkg.dependencies[I.FILE_LINK_PLUGIN_NAME], '不写入 dependencies（npm 上没有该包，避免 pnpm 解析失败）');
+  ok(profilePkg.dependencies && profilePkg.dependencies[I.FILE_LINK_PLUGIN_NAME] === 'file:./vendor/' + I.FILE_LINK_PLUGIN_NAME, '以 file:./vendor/<name> 声明依赖（避免被 dsh plugin 的 pnpm 当 extraneous 清理）');
   ok((await I.ensureFileLinkPlugin(profileDir)) === false, '重复安装幂等（版本一致时不再写盘/不再提示重启）');
+
+  // Issue #31：模拟 `dsh plugin add` 把 node_modules 副本移到 .ignored 后，扩展应自动修复
+  fs.rmSync(installedDir, { recursive: true, force: true });
+  ok((await I.ensureFileLinkPlugin(profileDir)) === true, 'node_modules 副本被清理后能自动修复（Issue #31）');
+  ok(fs.existsSync(path.join(installedDir, 'package.json')), '修复后 node_modules 副本恢复');
+  fs.rmSync(installedDir, { recursive: true, force: true });
+  fs.rmSync(vendoredDir, { recursive: true, force: true });
+  ok((await I.ensureFileLinkPlugin(profileDir)) === true, 'node_modules 与 vendor 双缺失时能从扩展内置文件重建');
   fs.rmSync(profileDir, { recursive: true, force: true });
 
   fs.rmSync(tmp, { recursive: true, force: true });

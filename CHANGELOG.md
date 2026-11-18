@@ -2,6 +2,24 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。完整提交历史见 [GitHub](https://github.com/Vithrive/Deepseek-Harness-for-VS-Code/commits/main)。
 
+## 1.1.3 —— 配套插件防清理（Issue #31）+ 文件链接 anchor 兜底（Issue #32）
+
+**忠实窗口（面板）**
+
+- **配套插件不再被 `dsh plugin` 命令静默清掉（Issue #31）**：`dsh-webview-clipboard` / `dsh-vscode-file-links` / `dsh-vscode-open-external` 此前直接写进 profile 的 `node_modules`、但不在 `dependencies` 里，`pnpm`（`dsh plugin add/install` 底层）有把它们当 extraneous 移进 `node_modules/.ignored` 的风险——dsh 启动时静默跳过这些 bundle，文件链接跳转、剪贴板中继、`window.open` 重定向全部悄悄失效，面板无任何提示。
+  - 现在同时写 `profiles/web/vendor/<name>`，并在 profile `package.json` 声明 `"<name>": "file:./vendor/<name>"`，pnpm 会当作正常依赖保留并链接回 `node_modules`；
+  - 每次准备面板（打开/刷新）仍检查 `node_modules` 与 `vendor` 两侧，缺失或版本不符立即重建（自愈）；
+  - 发生安装/修复且 dsh 已在运行时提示「重启 dsh web」，并在提示里点名这些插件可能被 `dsh plugin` 命令清理过，不再静默降级。
+- **文件链接 anchor 兜底（Issue #32）**：`dsh-vscode-file-links` 0.2.0——除既有 `button.fileLink` 外，也接管普通 `<a href>` 形式的本地路径链接（相对路径、`./` 前缀、盘符绝对路径）。外部链接、`#锚点`、`mailto:`/`file:`/`javascript:` 等 scheme 一律不接管；宿主拒绝（不在工作区内）时回放原始点击，默认行为不变。
+- **Issue #32 核查结论**：报告声称的根因（路径含分隔符时 DSH 不渲染 `button.fileLink`）在 DSH **0.2.2-rc.1**（报告者版本）与 **0.2.2-rc.4** 上均无法复现——用真实无头 Chrome 验证：`AGENTS.md`、`./AGENTS.md`、`_tools/webread.ps1`、`./_tools/webread.ps1`、`D:/AIworkspace/_tools/webread.ps1` 全部渲染为 `button.fileLink` 且 `title` 为原始路径；在「真实 buildIframeHtml + 受管认证代理 + 真实 DSH 页面 + 实装插件」的等价面板中点击分隔符链接，插件正确发出 `dsh-reveal-path`（path 精确）；宿主 `resolveWorkspaceTarget` 在真实 VS Code 1.134 扩展宿主中同样能解析相对/分隔符/绝对路径。报告症状更可能与 #31 的配套插件被清理（或旧版本/旧插件残留）有关——本版两项加固共同覆盖这些失败路径。
+
+**测试**
+
+- 新增 `bundled-plugin-vendor`（33 项断言）：三个插件 vendor/node_modules 双份落盘、`file:` 依赖声明、`.ignored` 式清理后自愈、双缺失时从扩展内置文件重建、幂等；
+- `file-link-client-sim` 27 → 36 项断言：anchor 接管（含分隔符/盘符绝对路径、内部子节点点击）、外部链接/锚点/非本地 scheme/修饰键不接管、锚点回执失败回放；
+- `workspace-file-link` 74 → 78 项断言：vendored 布局、依赖声明、node_modules/vendor 清理后重建；
+- 全套 **17 个测试套件**（新增 1 个）+ 真实 dsh 0.2.2-rc.4 e2e 全绿。
+
 ## 1.1.2 —— 修复桌面版装在自定义目录时无法识别（Issue #29）
 
 **忠实窗口（面板）**
