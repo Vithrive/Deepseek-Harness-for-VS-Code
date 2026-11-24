@@ -57,8 +57,24 @@ class FakeDsh {
     return new Promise((done) => this.server.close(done));
   }
   indexHtml() { return '<!DOCTYPE html><html><body>FAKE-DSH-INDEX</body></html>'; }
+  fence(authority, res) {
+    const hostname = String(authority || '').replace(/:\d+$/, '');
+    const loopback = hostname === 'localhost' || /^127\./.test(hostname) || hostname === '[::1]';
+    if (!loopback) {
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('forbidden');
+      return false;
+    }
+    return true;
+  }
   onRequest(req, res) {
     const authority = String(req.headers.host || '');
+    if (!this.fence(authority, res)) return;
+    if (req.headers.origin || req.headers['sec-fetch-site']) {
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('forbidden');
+      return;
+    }
     const url = new URL(req.url, 'http://x');
     const given = url.searchParams.getAll('token');
     if (url.pathname === '/' && given.length > 0) {
@@ -119,6 +135,12 @@ class FakeDsh {
   }
   onUpgrade(req, socket) {
     const authority = String(req.headers.host || '');
+    const hostname = authority.replace(/:\d+$/, '');
+    if (!(hostname === 'localhost' || /^127\./.test(hostname) || hostname === '[::1]')) {
+      socket.write('HTTP/1.1 403 Forbidden\r\nconnection: close\r\n\r\n');
+      socket.end();
+      return;
+    }
     if (!this.isAuthed(req, authority)) {
       socket.write('HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n');
       socket.end();
@@ -186,7 +208,7 @@ async function main() {
   ok(viaProxy.status === 200 && /FAKE-DSH-INDEX/.test(viaProxy.body), '经代理访问 / 返回 200 首页');
   const echo = await request(pport, 'POST', '/api/echo', { body: JSON.stringify({ hello: 'dsh' }), headers: { 'content-type': 'application/json' } });
   ok(echo.status === 200 && JSON.parse(echo.body).echoed === '{"hello":"dsh"}', '经代理 POST /api/echo 正常');
-  ok(JSON.parse(echo.body).host === '127.0.0.1:' + pport, '上游收到 Host=代理 authority（围栏一致）');
+  ok(JSON.parse(echo.body).host === '127.0.0.1:31117', '上游收到 Host=dsh 自身 authority（0.2.3 围栏 + Cookie 绑定一致）');
 
   console.log('[4] dsh 同端口重启（新令牌+新密钥）→ 401 自动重换');
   await dsh.close(); // 模拟 dsh 进程退出
@@ -247,6 +269,14 @@ async function main() {
     req.end();
   });
   ok(viaLocalhost.status === 200 && /FAKE-DSH-INDEX/.test(viaLocalhost.body), 'Host=localhost 来源自动换发并通过');
+
+  console.log('[8] 非回环入站 Host（0.2.3 栅栏场景）');
+  const foreign = await request(pport, 'GET', '/', { headers: { host: 'mac.example:9999' } });
+  ok(foreign.status === 200 && /FAKE-DSH-INDEX/.test(foreign.body), '客户端 Host 非回环时仍 200（代理已固定上游 authority）');
+
+  console.log('[9] 跨站标记剥离（webview iframe 场景）');
+  const cross = await request(pport, 'GET', '/', { headers: { origin: 'vscode-webview://abc123', 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'iframe' } });
+  ok(cross.status === 200 && /FAKE-DSH-INDEX/.test(cross.body), '带 Origin/sec-fetch 的请求经代理仍返回 200（已剥离跨站标记）');
 
   // 关闭阶段不信任优雅退出（keep-alive 空闲连接可能拖住 server.close 回调）：
   // 超时兜底 + 强制退出，保证测试进程确定性结束。
