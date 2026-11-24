@@ -865,6 +865,9 @@ function createAuthProxy(targetUrl, options) {
     const exchanges = new Map(); // authority -> Promise（并发去重）
     let token = null;
     let port = 0;
+    // dsh 0.2.3+: Host fence and auth cookie are both keyed by dsh own authority.
+    // Pin the proxy -> upstream leg to it, independent of the client authority.
+    const upstreamAuthority = normAuthority(target.hostname + ':' + targetPort) || ('127.0.0.1:' + targetPort);
 
     /** 扩展自身请求带的密钥头（本地模式同样发送，代理侧本地不校验，无副作用）。 */
     function keyHeaders() {
@@ -916,10 +919,7 @@ function createAuthProxy(targetUrl, options) {
     /** 令牌到位后为两个本机来源静默预换 Cookie。 */
     async function preAuth() {
       if (!token) return;
-      await Promise.all([
-        exchangeFor(`127.0.0.1:${port}`),
-        exchangeFor(`localhost:${port}`)
-      ]).catch(() => {});
+      await exchangeFor(upstreamAuthority).catch(() => {});
     }
 
     /** 无 Cookie 时的鉴权探测：直接访问上游首页的状态码（401 = 需认证）。 */
@@ -972,7 +972,7 @@ function createAuthProxy(targetUrl, options) {
       const headers = { ...req.headers };
       delete headers.host;
       delete headers.cookie;
-      for (const h of ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailers', 'transfer-encoding', 'upgrade']) {
+      for (const h of ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailers', 'transfer-encoding', 'upgrade', 'origin', 'referer', 'sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-dest', 'sec-fetch-user']) {
         delete headers[h];
       }
       headers.host = authority;
@@ -982,7 +982,7 @@ function createAuthProxy(targetUrl, options) {
 
     /** 普通 HTTP 转发（含 401 自动重换重试一次）。 */
     async function forward(req, res) {
-      const authority = normAuthority(req.headers.host) || `127.0.0.1:${port}`;
+      const authority = upstreamAuthority;
       let cookie = cookies.get(authority) || null;
       if (!cookie && token) cookie = await exchangeFor(authority);
       let status = await attempt(cookie);
@@ -1045,9 +1045,10 @@ function createAuthProxy(targetUrl, options) {
         } catch { /* noop */ }
         return;
       }
-      const authority = normAuthority(req.headers.host) || `127.0.0.1:${port}`;
+      const authority = upstreamAuthority;
       const cookie = cookies.get(authority) || null;
       const headers = { ...req.headers };
+      for (const h of ['origin', 'referer', 'sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-dest', 'sec-fetch-user', 'cookie']) delete headers[h];
       headers.host = authority;
       if (cookie) headers.cookie = cookie;
       const upstream = http.request({
@@ -1128,8 +1129,8 @@ function createAuthProxy(targetUrl, options) {
           u.hostname = 'localhost';
           return u.toString();
         },
-        hasCookieForBase: () => cookies.has(`127.0.0.1:${port}`),
-        hasCookieForTab: () => cookies.has(`localhost:${port}`),
+        hasCookieForBase: () => cookies.has(upstreamAuthority),
+        hasCookieForTab: () => cookies.has(upstreamAuthority),
         token: () => token,
         /** 扩展自身访问代理的密钥头（远程模式下无密钥请求会被 403）。 */
         keyHeaders,
